@@ -1,0 +1,84 @@
+
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2026_conference,times}
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage[colorlinks, linkcolor=red, anchorcolor=darkblue, citecolor=mygreen2, pagebackref]{hyperref}
+\usepackage{url}
+
+% We Add!
+\usepackage{natbib}
+\usepackage{color}
+\usepackage{graphicx}
+\definecolor{DeepPink}{RGB}{255,20,147}
+\usepackage{booktabs, multirow}
+\usepackage{xcolor,amsmath}
+\definecolor{darkblue}{rgb}{0,0.08,0.45}
+\definecolor{cvprblue}{rgb}{0.21,0.49,0.74}
+\definecolor{mygreen2}{RGB}{0 205 0}
+\usepackage{colortbl}
+\usepackage{amsfonts,bm,pifont}
+\usepackage{wrapfig}
+\usepackage{marvosym}
+\usepackage{placeins}
+
+\title{
+\raisebox{-0.15\height}{\includegraphics[height=0.6cm]{Figures/facon1.png}}\hspace{0.25em}
+VLA-Adapter: An Effective Paradigm for Tiny-Scale Vision-Language-Action Model}
+
+% Authors must not appear in the submitted version. They should be hidden
+% as long as the \iclrfinalcopy macro remains commented out below.
+% Non-anonymous submissions will be rejected without review.
+
+\author{Yihao Wang$^{1,2,4,*,\diamondsuit}$ \quad Pengxiang Ding$^{2,3,4,*,\dagger}$ \quad Lingxiao Li$^{1,4,5}$ \quad Can Cui$^{2,4}$\\ 
+\textbf{Zirui Ge$^{3,4}$ \quad Xinyang Tong$^{2,4}$ \quad Wenxuan Song$^{4,6}$ \quad Han Zhao$^{2,3,4}$ \quad Wei Zhao$^{2,4}$}\\ 
+\textbf{Pengxu Hou$^{6}$ \quad Siteng Huang$^{2}$ \quad Yifan Tang$^{1}$ \quad Wenhui Wang$^{1}$ \quad Ru Zhang$^{1,}$\textsuperscript{\Letter}}\\
+\textbf{Jianyi Liu$^{1}$ \quad Donglin Wang$^{2,}$\textsuperscript{\Letter}}\\
+$^{1}$Beijing University of Posts and Telecommunications \thinspace $^{2}$Westlake University \thinspace $^{3}$Zhejiang University\\
+$^{4}$OpenHelix Team \quad $^{5}$State Key Laboratory of Networking and Switching Technology\\
+$^{6}$The Hong Kong University of Science and Technology (Guangzhou)\\
+$^{*}$Equal contribution: yh-wang@bupt.edu.cn; \thinspace dingpx2015@gmail.com\\
+\textsuperscript{\Letter}Corresponding Author \thinspace 
+$^{\dagger}$Project Lead \thinspace
+$^{\diamondsuit}$Work done during interning at Westlake University\\
+}
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to \LaTeX{} to determine where to break
+% the lines. Using \AND forces a linebreak at that point. So, if \LaTeX{}
+% puts 3 of 4 authors names on the first line, and the last on the second
+% line, try using \AND instead of \And before the third author name.
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+\iclrfinalcopy % Uncomment for camera-ready version, but NOT for submission.
+\begin{document}
+
+
+\maketitle
+
+\begin{abstract}
+    Vision-Language-Action (VLA) models typically bridge the gap between perceptual and action spaces by pre-training a large-scale Vision-Language Model (VLM) on robotic data. While this approach greatly enhances performance, it also incurs significant training costs. In this paper, we investigate how to effectively bridge vision-language (VL) representations to action (A). We introduce VLA-Adapter, a novel paradigm designed to reduce the reliance of VLA models on large-scale VLMs and extensive pre-training. To this end, we first systematically analyze the effectiveness of various VL conditions and present key findings on which conditions are essential for bridging perception and action spaces. Based on these insights, we propose a lightweight Policy module with Bridge Attention, which autonomously injects the optimal condition into the action space. In this way, our method achieves high performance using only a 0.5B-parameter backbone, without any robotic data pre-training. Extensive experiments on both simulated and real-world robotic benchmarks demonstrate that VLA-Adapter not only achieves state-of-the-art level performance, but also offers the fast inference speed reported to date. Furthermore, thanks to the proposed advanced bridging paradigm, VLA-Adapter enables the training of a powerful VLA model in just 8 hours on a single consumer-grade GPU, greatly lowering the barrier to deploying the VLA model. Project page: \textcolor{DeepPink}{\url{https://vla-adapter.github.io/}}.
+\end{abstract}
+
+\input{Sections/Introduction}
+\input{Sections/Related_work}
+\input{Sections/Methodology}
+\input{Sections/Experiments}
+\input{Sections/Conclusion}
+\input{Sections/Limitation}
+\input{Sections/Acknowledgments}
+
+\bibliography{iclr2026_conference}
+\bibliographystyle{iclr2026_conference}
+
+\newpage
+\appendix
+\input{Sections/Appendix}
+
+\end{document}
