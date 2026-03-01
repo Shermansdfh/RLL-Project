@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -225,6 +226,35 @@ def log_message(message: str, log_file=None):
         log_file.flush()
 
 
+def print_bottleneck_diagnosis(timing_dict: dict, log_file=None, prefix: str = ""):
+    """Print mean timing (ms) and % of step for each phase. timing_dict has list values in seconds."""
+    if not timing_dict or all(len(v) == 0 for v in timing_dict.values()):
+        return
+    step_phases = ["prepare_obs", "env_step"]
+    policy_phases = ["preprocess_transfer", "model_forward"]
+    step_data = [(k, timing_dict[k]) for k in step_phases if timing_dict.get(k)]
+    policy_data = [(k, timing_dict[k]) for k in policy_phases if timing_dict.get(k)]
+    lines = [f"{prefix}Bottleneck diagnosis:"]
+    if step_data:
+        total_s = sum(sum(v) / len(v) if v else 0.0 for _, v in step_data)
+        n = len(step_data[0][1])
+        lines.append(f"  Per env step (n_steps={n}):")
+        for k, v in step_data:
+            mean_ms = (sum(v) / len(v)) * 1000 if v else 0
+            pct = 100.0 * (sum(v) / len(v)) / total_s if total_s else 0
+            lines.append(f"    {k:<22} {mean_ms:>10.2f} ms  {pct:>5.1f}%")
+        lines.append(f"    {'total':<22} {total_s*1000:>10.2f} ms  100.0%")
+    if policy_data:
+        total_s = sum(sum(v) / len(v) if v else 0.0 for _, v in policy_data)
+        n = len(policy_data[0][1])
+        lines.append(f"  Per policy query (n_queries={n}):")
+        for k, v in policy_data:
+            mean_ms = (sum(v) / len(v)) * 1000 if v else 0
+            pct = 100.0 * (sum(v) / len(v)) / total_s if total_s else 0
+            lines.append(f"    {k:<22} {mean_ms:>10.2f} ms  {pct:>5.1f}%")
+        lines.append(f"    {'total':<22} {total_s*1000:>10.2f} ms  100.0%")
+    log_message("\n".join(lines), log_file)
+
 
 def load_initial_states(cfg: GenerateConfig, task_suite, task_id: int, log_file=None):
     """Load initial states for the given task."""
@@ -292,6 +322,7 @@ def run_episode(
     noisy_action_projector=None,
     initial_state=None,
     log_file=None,
+    timing_dict=None,
 ):
     """Run a single episode in the environment."""
     # Reset environment
@@ -326,7 +357,10 @@ def run_episode(
                 continue
 
             # Prepare observation
+            t_prep = time.perf_counter()
             observation, img = prepare_observation(obs, resize_size)
+            if timing_dict is not None:
+                timing_dict.setdefault("prepare_obs", []).append(time.perf_counter() - t_prep)
             replay_images.append(img)
 
             # If action queue is empty, requery model
@@ -342,7 +376,8 @@ def run_episode(
                     proprio_projector=proprio_projector,
                     noisy_action_projector=noisy_action_projector,
                     use_film=cfg.use_film,
-                    use_minivlm=cfg.use_minivlm
+                    use_minivlm=cfg.use_minivlm,
+                    timing_dict=timing_dict,
                 )
 
                 action_queue.extend(actions) 
@@ -356,7 +391,10 @@ def run_episode(
             action = process_action(action, cfg.model_family)
 
             # Execute action in environment
+            t_env = time.perf_counter()
             obs, reward, done, info = env.step(action.tolist())
+            if timing_dict is not None:
+                timing_dict.setdefault("env_step", []).append(time.perf_counter() - t_env)
             if done:
                 success = True
                 break
@@ -396,6 +434,9 @@ def run_task(
     # Initialize environment and get task description
     env, task_description = get_libero_env(task, cfg.model_family, resolution=cfg.env_img_res)
 
+    # Timing for bottleneck diagnosis
+    timing_dict = {"prepare_obs": [], "preprocess_transfer": [], "model_forward": [], "env_step": []}
+
     # Start episodes
     task_episodes, task_successes = 0, 0
     for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
@@ -433,6 +474,7 @@ def run_task(
             noisy_action_projector,
             initial_state,
             log_file,
+            timing_dict=timing_dict,
         )
 
         # Update counters
@@ -458,7 +500,9 @@ def run_task(
 
     log_message(f"Current task success rate: {task_success_rate}", log_file)
     log_message(f"Current total success rate: {total_success_rate}", log_file)
-    
+
+    print_bottleneck_diagnosis(timing_dict, log_file=log_file, prefix=f"[Task {task_id}] ")
+
     # close env
     env.close()
     del env

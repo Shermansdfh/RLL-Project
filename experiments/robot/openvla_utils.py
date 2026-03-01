@@ -745,6 +745,7 @@ def get_vla_action(
     noisy_action_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False,
     use_minivlm: bool = False,
+    timing_dict: Optional[Dict[str, List[float]]] = None,
 ) -> List[np.ndarray]:
     """
     Generate action predictions with the VLA policy.
@@ -764,6 +765,7 @@ def get_vla_action(
         List[np.ndarray]: Predicted actions
     """
     with torch.inference_mode():
+        t0 = time.perf_counter()
 
         # Collect all input images
         all_images = [obs["full_image"]]
@@ -803,8 +805,11 @@ def get_vla_action(
             obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
             proprio = obs["state"]
 
-        
+        if timing_dict is not None:
+            timing_dict.setdefault("preprocess_transfer", []).append(time.perf_counter() - t0)
+
         # Generate action
+        t_forward = time.perf_counter()
         if action_head is None:
             # Standard VLA output (single-image inputs, discrete actions)
             action, _ = vla.predict_action(**inputs, unnorm_key=cfg.unnorm_key, do_sample=False)
@@ -820,6 +825,9 @@ def get_vla_action(
                 action_head=action_head,
                 use_film=use_film,
             )
+
+        if timing_dict is not None:
+            timing_dict.setdefault("model_forward", []).append(time.perf_counter() - t_forward)
 
     # Extract subset of actions for open loop steps
     return [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]

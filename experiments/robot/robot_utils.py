@@ -107,6 +107,7 @@ def get_action(
     noisy_action_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False,
     use_minivlm: bool = False,
+    timing_dict: Optional[Dict[str, List[float]]] = None,
 ) -> Union[List[np.ndarray], np.ndarray]:
     """
     Query the model to get action predictions.
@@ -140,7 +141,8 @@ def get_action(
                 proprio_projector=proprio_projector,
                 noisy_action_projector=noisy_action_projector,
                 use_film=use_film,
-                use_minivlm=use_minivlm
+                use_minivlm=use_minivlm,
+                timing_dict=timing_dict,
             )
         else:
             raise ValueError(f"Unsupported model family: {cfg.model_family}")
