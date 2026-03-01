@@ -151,3 +151,15 @@ data/
 # Rollout videos and wandb logs
 rollouts/
 wandb/
+
+# Local run outputs / generated metadata
+eval_logs/
+outputs/
+runs/
+codebase_graph.graphml
+vla_adapter.egg-info/
+vla-scripts/vla_adapter.egg-info/
+
+# Local unpacked paper artifacts (legacy root copies)
+Figures/
+Sections/

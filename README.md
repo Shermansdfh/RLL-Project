@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="figure/LOGO2.png" width="70%" style="vertical-align:-7px;" />
+  <img src="docs/assets/figure/LOGO2.png" width="70%" style="vertical-align:-7px;" />
 
 
 [![Paper](https://img.shields.io/badge/Paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/pdf/2509.09372) [![Hugging Face Collection](https://img.shields.io/badge/Models-fcd022?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/VLA-Adapter) [![Twitter](https://img.shields.io/badge/AK-%23000000.svg?style=for-the-badge&logo=x&logoColor=white)](https://x.com/_akhaliq/status/1966610780838621241) [![WeChat](https://img.shields.io/badge/WeChat--Group-07C160?style=for-the-badge&logo=wechat&logoColor=white)](https://github.com/OpenHelix-Team/VLA-Adapter/issues/1)
@@ -11,7 +11,7 @@
 
 <div id="top" align="center">
 <p align="center">
-<img src=figure/Framework.png width=90% />
+<img src=docs/assets/figure/Framework.png width=90% />
 </p>
 </div>
 
