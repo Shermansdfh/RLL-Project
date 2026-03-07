@@ -55,6 +55,7 @@ from prismatic.vla.constants import (
     NUM_TOKENS
 )
 from prismatic.vla.datasets import RLDSDataset, RLDSBatchTransform
+from prismatic.vla.datasets.rlds.oxe.libero_task_filter import get_libero_task_languages
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 from prismatic.models import load, load_vla
 
@@ -74,6 +75,7 @@ class FinetuneConfig:
     # Dataset
     data_root_dir: Path = Path("datasets/rlds")      # Directory containing RLDS datasets
     dataset_name: str = "aloha_scoop_x_into_bowl"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    libero_task_ids: Optional[str] = None            # For LIBERO: train on 1-2 tasks only, e.g. "0" or "0,1"; if None, all tasks
     run_root_dir: Path = Path("runs")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
@@ -1000,6 +1002,15 @@ def finetune(cfg: FinetuneConfig) -> None:
         use_proprio=cfg.use_proprio,
         use_minivlm=cfg.use_minivlm
         )
+    # Optional: filter to 1-2 LIBERO tasks when libero_task_ids is set
+    extra_traj_kwargs = None
+    if cfg.libero_task_ids and cfg.dataset_name.startswith("libero_"):
+        suite = cfg.dataset_name.replace("_no_noops", "").replace("_4_task_suites", "")
+        task_ids = [int(x.strip()) for x in cfg.libero_task_ids.split(",")]
+        allowed = get_libero_task_languages(suite, task_ids)
+        extra_traj_kwargs = {"allowed_language_instructions": allowed}
+        if distributed_state.is_main_process:
+            print(f"[LIBERO] Training on task(s) {task_ids} only: {allowed}")
     train_dataset = RLDSDataset(
         cfg.data_root_dir,
         cfg.dataset_name,
@@ -1007,6 +1018,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         resize_resolution=tuple(vla.module.config.image_sizes),
         shuffle_buffer_size=cfg.shuffle_buffer_size,
         image_aug=cfg.image_aug,
+        extra_traj_transform_kwargs=extra_traj_kwargs,
     )
     if cfg.use_val_set:
         val_dataset = RLDSDataset(
@@ -1017,6 +1029,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             shuffle_buffer_size=cfg.shuffle_buffer_size // 10,
             image_aug=cfg.image_aug,
             train=False,
+            extra_traj_transform_kwargs=extra_traj_kwargs,
         )
 
     # [Important] Save dataset statistics so that we can unnormalize actions during inference

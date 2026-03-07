@@ -107,6 +107,7 @@ class GenerateConfig:
     # LIBERO environment-specific parameters
     #################################################################################################################
     task_suite_name: str = TaskSuite.LIBERO_SPATIAL  # Task suite
+    task_ids: Optional[str] = None                   # Comma-separated task IDs to evaluate (e.g. "0" or "0,1"); if None, all tasks
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 50                    # Number of rollouts per task
     initial_states_path: str = "DEFAULT"             # "DEFAULT", or path to initial states JSON file
@@ -549,9 +550,18 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     log_message(f"Task suite: {cfg.task_suite_name}", log_file)
 
+    # Resolve task IDs to evaluate
+    if cfg.task_ids is not None:
+        task_id_list = [int(x.strip()) for x in cfg.task_ids.split(",")]
+        for tid in task_id_list:
+            assert 0 <= tid < num_tasks, f"task_id {tid} out of range [0, {num_tasks})"
+        log_message(f"Evaluating only task(s): {task_id_list}", log_file)
+    else:
+        task_id_list = list(range(num_tasks))
+
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(num_tasks)):
+    for task_id in tqdm.tqdm(task_id_list):
         total_episodes, total_successes = run_task(
             cfg,
             task_suite,

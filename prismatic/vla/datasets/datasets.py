@@ -8,7 +8,7 @@ format to OpenVLA, IterableDataset shim.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 import numpy as np
 import random
 import torch
@@ -154,6 +154,7 @@ class RLDSDataset(IterableDataset):
         shuffle_buffer_size: int = 256_000,
         train: bool = True,
         image_aug: bool = False,
+        extra_traj_transform_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Lightweight wrapper around RLDS TFDS Pipeline for use with PyTorch/OpenVLA Data Loaders."""
         self.data_root_dir, self.data_mix, self.batch_transform = data_root_dir, data_mix, batch_transform
@@ -180,13 +181,16 @@ class RLDSDataset(IterableDataset):
             load_language=True,
             action_proprio_normalization_type=ACTION_PROPRIO_NORMALIZATION_TYPE,
         )
+        traj_transform_kwargs = dict(
+            window_size=1,                                      # If we wanted to feed / predict more than one step
+            future_action_window_size=NUM_ACTIONS_CHUNK-1,      # For action chunking
+            skip_unlabeled=True,                                # Skip trajectories without language labels
+            goal_relabeling_strategy="uniform",                 # Goals are currently unused
+        )
+        if extra_traj_transform_kwargs:
+            traj_transform_kwargs.update(extra_traj_transform_kwargs)
         rlds_config = dict(
-            traj_transform_kwargs=dict(
-                window_size=1,                                      # If we wanted to feed / predict more than one step
-                future_action_window_size=NUM_ACTIONS_CHUNK-1,      # For action chunking
-                skip_unlabeled=True,                                # Skip trajectories without language labels
-                goal_relabeling_strategy="uniform",                 # Goals are currently unused
-            ),
+            traj_transform_kwargs=traj_transform_kwargs,
             frame_transform_kwargs=dict(
                 resize_size=resize_resolution,
                 num_parallel_calls=16,                          # For CPU-intensive ops (decoding, resizing, etc.)

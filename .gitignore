@@ -166,3 +166,17 @@ Sections/
 
 # Claude Code
 .claude/
+
+# Local experiment artifacts
+LIBERO/
+experiments/logs/
+environment_ActionBridge.yml
+
+# Local backup/model byproducts
+pretrained_models/configs/config.json.back.*
+pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/.gitattributes
+pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/checkpoints/
+pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/config.json
+pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/config.yaml
+pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/prism-qwen25-extra-dinosiglip-224px+0_5b+stage-finetune+x7.jsonl
+pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/run-metrics.jsonl

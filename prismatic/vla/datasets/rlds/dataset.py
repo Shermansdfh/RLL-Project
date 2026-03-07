@@ -262,6 +262,7 @@ def apply_trajectory_transforms(
     max_proprio: Optional[float] = None,
     task_augment_strategy: Optional[str] = None,
     task_augment_kwargs: dict = {},
+    allowed_language_instructions: Optional[set] = None,
     num_parallel_calls: int = tf.data.AUTOTUNE,
 ) -> dl.DLataset:
     """
@@ -300,6 +301,19 @@ def apply_trajectory_transforms(
             raise ValueError("skip_unlabeled=True but dataset does not have language labels.")
 
         dataset = dataset.filter(lambda x: tf.math.reduce_any(x["task"]["language_instruction"] != ""))
+
+    if allowed_language_instructions is not None:
+        allowed_list = sorted(allowed_language_instructions)
+        allowed = tf.constant(allowed_list)
+
+        def _lang_filter(x):
+            lang = x["task"]["language_instruction"]
+            if lang.shape.rank > 0:
+                lang = lang[0]
+            decoded = tf.strings.lower(tf.strings.strip(lang))
+            return tf.reduce_any(tf.equal(decoded, allowed))
+
+        dataset = dataset.filter(_lang_filter)
 
     if max_action is not None:
         dataset = dataset.filter(lambda x: tf.math.reduce_all(tf.math.abs(x["action"]) <= max_action))
