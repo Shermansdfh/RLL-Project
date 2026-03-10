@@ -163,3 +163,6 @@ vla-scripts/vla_adapter.egg-info/
 # Local unpacked paper artifacts (legacy root copies)
 Figures/
 Sections/
+
+# Claude Code
+.claude/
