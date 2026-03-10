@@ -35,7 +35,7 @@ from experiments.robot.openvla_utils import (
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
-from prismatic.models.action_heads import L1RegressionActionHead
+from prismatic.models.action_heads import FlowMatchingActionHead, L1RegressionActionHead
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import ProprioProjector
@@ -79,6 +79,9 @@ class FinetuneConfig:
 
     # Algorithm and architecture
     use_l1_regression: bool = True                   # If True, trains continuous action head with L1 regression objective
+    use_flow_matching: bool = False                  # If True, trains continuous action head with rectified flow matching
+    flow_matching_num_steps: int = 8                 # Number of Euler steps for flow sampling at inference-time
+    flow_matching_loss_type: str = "l1"              # One of {"l1", "l2"} for velocity matching loss
     use_diffusion: bool = False                      # If True, trains continuous action head with diffusion modeling objective (DDIM)
     num_diffusion_steps: int = 50                    # (When `diffusion==True`) Number of diffusion steps for training 
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
@@ -293,6 +296,7 @@ def run_forward_pass(
     action_tokenizer,
     device_id,
     use_l1_regression,
+    use_flow_matching,
     use_proprio,
     use_film,
     num_patches,
@@ -353,7 +357,7 @@ def run_forward_pass(
     next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
 
     # Compute metrics for discrete action representation (next-token prediction)
-    if not (use_l1_regression):
+    if not (use_l1_regression or use_flow_matching):
         loss = output.loss
         predicted_token_ids = output.logits[:, num_patches:-1].argmax(dim=2)
 
@@ -408,14 +412,30 @@ def run_forward_pass(
             multi_layer_hidden_states.append(all_hidden_states)
         multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim = 1)
 
-        predicted_actions = action_head.module.predict_action(
-            multi_layer_hidden_states,
-            proprio=batch["proprio"] if use_proprio else None,
-            proprio_projector=proprio_projector if use_proprio else None,
-            phase=cfg.phase,
+        if use_flow_matching:
+            loss = action_head.module.compute_flow_matching_loss(
+                multi_layer_hidden_states,
+                target_actions=ground_truth_actions,
+                proprio=batch["proprio"] if use_proprio else None,
+                proprio_projector=proprio_projector if use_proprio else None,
+                loss_type=cfg.flow_matching_loss_type,
             )
-
-        loss = torch.nn.L1Loss()(predicted_actions, ground_truth_actions)
+            with torch.no_grad():
+                predicted_actions = action_head.module.predict_action(
+                    multi_layer_hidden_states,
+                    proprio=batch["proprio"] if use_proprio else None,
+                    proprio_projector=proprio_projector if use_proprio else None,
+                    phase=cfg.phase,
+                    num_steps=cfg.flow_matching_num_steps,
+                )
+        else:
+            predicted_actions = action_head.module.predict_action(
+                multi_layer_hidden_states,
+                proprio=batch["proprio"] if use_proprio else None,
+                proprio_projector=proprio_projector if use_proprio else None,
+                phase=cfg.phase,
+                )
+            loss = torch.nn.L1Loss()(predicted_actions, ground_truth_actions)
 
         metrics.update(
             {
@@ -424,7 +444,7 @@ def run_forward_pass(
         )
 
         # Get detailed L1 losses for logging
-        should_log_l1_loss = use_l1_regression
+        should_log_l1_loss = use_l1_regression or use_flow_matching
         if should_log_l1_loss:
             ground_truth_curr_action = ground_truth_actions[:, 0]
             predicted_curr_action = predicted_actions[:, 0]
@@ -654,6 +674,7 @@ def run_validation(
                 action_tokenizer=action_tokenizer,
                 device_id=device_id,
                 use_l1_regression=cfg.use_l1_regression,
+                use_flow_matching=cfg.use_flow_matching,
                 use_proprio=cfg.use_proprio,
                 use_film=cfg.use_film,
                 num_patches=num_patches,
@@ -705,8 +726,10 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     global RAW_STATE_DICT
 
-    assert not (cfg.use_l1_regression and cfg.use_diffusion), (
-        "Cannot do both L1 regression and diffusion. Please pick one of them!"
+    assert not (cfg.use_l1_regression and cfg.use_diffusion), "Cannot do both L1 regression and diffusion."
+    assert not (cfg.use_flow_matching and cfg.use_diffusion), "Cannot do both flow matching and diffusion."
+    assert not (cfg.use_l1_regression and cfg.use_flow_matching), (
+        "Cannot do both L1 regression and flow matching."
     )
 
     # Trim trailing forward slash ('/') in VLA path if it exists
@@ -868,6 +891,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Wrap VLA with DDP
     vla = wrap_ddp(vla, device_id, find_unused=True)
 
+    proprio_projector = None
+    action_head = None
+
     # If applicable, instantiate proprio projector
     if cfg.use_proprio:
         proprio_projector = init_module(
@@ -879,7 +905,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             to_bf16=True,
         )
 
-    # If applicable, instantiate continuous action head for L1 regression
+    # If applicable, instantiate continuous action head.
     if cfg.use_l1_regression:
         action_head = init_module(
         L1RegressionActionHead,
@@ -894,6 +920,22 @@ def finetune(cfg: FinetuneConfig) -> None:
             },
         to_bf16=True,
         )
+    elif cfg.use_flow_matching:
+        action_head = init_module(
+            FlowMatchingActionHead,
+            "action_head",
+            cfg,
+            device_id,
+            {
+                "input_dim": vla.module.llm_dim,
+                "hidden_dim": vla.module.llm_dim,
+                "action_dim": ACTION_DIM,
+                "num_actions_chunk": NUM_ACTIONS_CHUNK,
+                "num_action_tokens": NUM_TOKENS,
+                "num_inference_steps": cfg.flow_matching_num_steps,
+            },
+            to_bf16=True,
+        )
 
     # Get number of vision patches
     NUM_PATCHES = vla.module.vision_backbone.get_num_patches() * vla.module.vision_backbone.get_num_images_in_input()
@@ -901,7 +943,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Instantiate optimizer
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
-    if cfg.use_l1_regression:
+    if cfg.use_l1_regression or cfg.use_flow_matching:
         trainable_params += [param for param in action_head.parameters() if param.requires_grad]
 
     if cfg.use_proprio:
@@ -1018,7 +1060,11 @@ def finetune(cfg: FinetuneConfig) -> None:
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
             # Compute training metrics and loss
-            compute_diffusion_l1 = (cfg.use_l1_regression and batch_idx % cfg.diffusion_sample_freq == 0) or (cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0)
+            compute_diffusion_l1 = (
+                (cfg.use_l1_regression and batch_idx % cfg.diffusion_sample_freq == 0)
+                or (cfg.use_flow_matching and batch_idx % cfg.diffusion_sample_freq == 0)
+                or (cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0)
+            )
             loss, metrics = run_forward_pass(
                 vla=vla,
                 action_head=action_head,
@@ -1027,6 +1073,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 action_tokenizer=action_tokenizer,
                 device_id=device_id,
                 use_l1_regression=cfg.use_l1_regression,
+                use_flow_matching=cfg.use_flow_matching,
                 use_proprio=cfg.use_proprio,
                 use_film=cfg.use_film,
                 num_patches=NUM_PATCHES,

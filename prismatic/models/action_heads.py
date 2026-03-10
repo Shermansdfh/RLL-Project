@@ -7,6 +7,7 @@ Implementations of various action heads, which serve as alternatives to VLM sequ
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from prismatic.vla.constants import ACTION_DIM, ACTION_TOKEN_BEGIN_IDX, IGNORE_INDEX, NUM_ACTIONS_CHUNK, PROPRIO_DIM, STOP_INDEX, NUM_TOKENS
 
 
@@ -408,3 +409,152 @@ class MLPResNetBlock_Pro(nn.Module):
         # residual + FFN
         x = self.ffn(output + x)
         return x
+
+
+class FlowMatchingActionHead(nn.Module):
+    """Rectified-flow action head with Euler sampling for chunked continuous actions."""
+
+    def __init__(
+        self,
+        input_dim=4096,
+        hidden_dim=4096,
+        action_dim=ACTION_DIM,
+        num_actions_chunk=NUM_ACTIONS_CHUNK,
+        num_action_tokens=NUM_TOKENS,
+        time_embed_dim=256,
+        num_inference_steps=8,
+    ):
+        super().__init__()
+        self.action_dim = action_dim
+        self.num_actions_chunk = num_actions_chunk
+        self.num_action_tokens = num_action_tokens
+        self.num_inference_steps = num_inference_steps
+        self.flat_action_dim = self.action_dim * self.num_actions_chunk
+
+        # Use last-layer task/action summaries as conditioning.
+        self.context_proj = nn.Sequential(
+            nn.LayerNorm(input_dim * 2),
+            nn.Linear(input_dim * 2, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+        )
+
+        self.time_embed = nn.Sequential(
+            nn.Linear(1, time_embed_dim),
+            nn.SiLU(),
+            nn.Linear(time_embed_dim, time_embed_dim),
+            nn.SiLU(),
+        )
+
+        self.flow_mlp = nn.Sequential(
+            nn.LayerNorm(self.flat_action_dim + hidden_dim + time_embed_dim),
+            nn.Linear(self.flat_action_dim + hidden_dim + time_embed_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, self.flat_action_dim),
+        )
+
+    def _encode_context(self, actions_hidden_states, proprio=None, proprio_projector=None):
+        if actions_hidden_states.ndim != 4:
+            raise ValueError("Expected `actions_hidden_states` with shape [B, L, T, D].")
+
+        last_layer = actions_hidden_states[:, -1]  # [B, T, D]
+        action_tokens = last_layer[:, -self.num_action_tokens :, :]
+        task_tokens = last_layer[:, : -self.num_action_tokens, :]
+
+        if task_tokens.shape[1] == 0:
+            task_summary = torch.zeros_like(action_tokens.mean(dim=1))
+        else:
+            task_summary = task_tokens.mean(dim=1)
+        action_summary = action_tokens.mean(dim=1)
+        context = torch.cat([task_summary, action_summary], dim=-1)
+        context = self.context_proj(context)
+
+        if proprio is not None and proprio_projector is not None:
+            batch_size = last_layer.shape[0]
+            proprio = proprio.reshape(batch_size, -1).to(context.dtype)
+            proprio_features = proprio_projector(proprio).squeeze(1)
+            context = context + proprio_features.to(context.dtype)
+
+        return context
+
+    def predict_velocity(self, actions_hidden_states, x_t, t, proprio=None, proprio_projector=None):
+        batch_size = x_t.shape[0]
+        x_t = x_t.to(torch.float32)
+        t = t.to(dtype=x_t.dtype, device=x_t.device).view(batch_size, 1)
+
+        context = self._encode_context(actions_hidden_states, proprio=proprio, proprio_projector=proprio_projector)
+        context = context.to(dtype=x_t.dtype, device=x_t.device)
+        t_embed = self.time_embed(t)
+
+        flow_input = torch.cat([x_t.reshape(batch_size, -1), context, t_embed], dim=-1)
+        velocity = self.flow_mlp(flow_input)
+        return velocity.view(batch_size, self.num_actions_chunk, self.action_dim)
+
+    def compute_flow_matching_loss(
+        self,
+        actions_hidden_states,
+        target_actions,
+        proprio=None,
+        proprio_projector=None,
+        loss_type="l1",
+    ):
+        target_actions = target_actions.to(torch.float32)
+        batch_size = target_actions.shape[0]
+        device = target_actions.device
+
+        noise = torch.randn_like(target_actions)
+        t = torch.rand(batch_size, device=device, dtype=torch.float32) * 0.999 + 0.001
+        x_t = t[:, None, None] * noise + (1.0 - t[:, None, None]) * target_actions
+        target_velocity = noise - target_actions
+
+        pred_velocity = self.predict_velocity(
+            actions_hidden_states,
+            x_t,
+            t,
+            proprio=proprio,
+            proprio_projector=proprio_projector,
+        )
+
+        if loss_type == "l2":
+            return F.mse_loss(pred_velocity, target_velocity)
+        return F.l1_loss(pred_velocity, target_velocity)
+
+    @torch.no_grad()
+    def predict_action(
+        self,
+        actions_hidden_states,
+        proprio=None,
+        proprio_projector=None,
+        phase="Inference",
+        num_steps=None,
+    ):
+        del phase  # Kept for drop-in compatibility with existing call sites.
+        device = actions_hidden_states.device
+        batch_size = actions_hidden_states.shape[0]
+        steps = self.num_inference_steps if num_steps is None else max(int(num_steps), 1)
+
+        x_t = torch.randn(
+            batch_size,
+            self.num_actions_chunk,
+            self.action_dim,
+            device=device,
+            dtype=torch.float32,
+        )
+        dt = -1.0 / float(steps)
+
+        for step_idx in range(steps):
+            t_value = 1.0 + dt * step_idx
+            t = torch.full((batch_size,), t_value, device=device, dtype=torch.float32)
+            velocity = self.predict_velocity(
+                actions_hidden_states,
+                x_t,
+                t,
+                proprio=proprio,
+                proprio_projector=proprio_projector,
+            )
+            x_t = x_t + dt * velocity
+
+        return x_t
