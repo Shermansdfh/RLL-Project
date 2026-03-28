@@ -8,6 +8,7 @@ from prismatic.vla.datasets.rlds import dataset as rlds_dataset
 def _make_fake_tf():
     return types.SimpleNamespace(
         int64="int64",
+        string="string",
         constant=lambda value, dtype=None: value,
         range=lambda n, dtype=None: list(range(n)),
         zeros=lambda shape, dtype=None: [0] * (shape[0] if isinstance(shape, (list, tuple)) else shape),
