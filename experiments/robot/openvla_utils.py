@@ -503,10 +503,13 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead]:
     # Initialize appropriate action head based on configuration
     if cfg.use_l1_regression:
         action_head = L1RegressionActionHead(
-            input_dim=llm_dim, 
-            hidden_dim=llm_dim, 
+            input_dim=llm_dim,
+            hidden_dim=llm_dim,
             action_dim=ACTION_DIM,
             use_pro_version=cfg.use_pro_version,
+            use_depth_wise_weighting=getattr(cfg, "use_depth_wise_weighting", False),
+            share_depth_weights=getattr(cfg, "share_depth_weights", False),
+            normalize_aq_before_combination=getattr(cfg, "normalize_aq_before_combination", True),
         )
 
     else:
