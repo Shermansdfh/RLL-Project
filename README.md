@@ -230,6 +230,10 @@ We use the `Prismatic-VLMs` architecture. Since the file is large, please downlo
 
 `vla-scripts/finetune.py` and `experiments/robot/libero/run_libero_eval.py` share `--libero_object_private_split` presets (`stage1`, `stage2`) for `libero_object`. See [`experiments/private-libero-object-splits.md`](experiments/private-libero-object-splits.md) for full usage details, commands, and preset definitions.
 
+### :bookmark_tabs: Depth-Wise Feature Weighting
+
+Learnable linear combination of VLM hidden-state layers for Bridge Attention inputs. Enable with `--use_depth_wise_weighting True`. See [`experiments/depth-wise-feature-weighting.md`](experiments/depth-wise-feature-weighting.md) for architecture details, configuration flags, and training commands (full dataset and private split Stage 1 / Stage 2).
+
 
 ### :ledger: How to Train on Extremely Limited VRAM GPUs
 
