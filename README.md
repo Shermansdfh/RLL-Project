@@ -226,6 +226,10 @@ We use the `Prismatic-VLMs` architecture. Since the file is large, please downlo
 ### :books: Related File for Training
 * `vla-scripts/finetune.py`: VLA fine-tuning script
 
+### :bookmark_tabs: Private LIBERO-Object Split Presets
+
+`vla-scripts/finetune.py` and `experiments/robot/libero/run_libero_eval.py` share `--libero_object_private_split` presets (`stage1`, `stage2`) for `libero_object`. See [`experiments/private-libero-object-splits.md`](experiments/private-libero-object-splits.md) for full usage details, commands, and preset definitions.
+
 
 ### :ledger: How to Train on Extremely Limited VRAM GPUs
 

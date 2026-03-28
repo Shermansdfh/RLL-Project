@@ -32,6 +32,10 @@ from experiments.robot.libero.libero_utils import (
     quat2axisangle,
     save_rollout_video,
 )
+from experiments.robot.libero.private_object_split import (
+    get_private_libero_object_split,
+    get_private_libero_object_task_infos,
+)
 from experiments.robot.openvla_utils import (
     get_action_head,
     get_noisy_action_projector,
@@ -107,6 +111,7 @@ class GenerateConfig:
     # LIBERO environment-specific parameters
     #################################################################################################################
     task_suite_name: str = TaskSuite.LIBERO_SPATIAL  # Task suite
+    libero_object_private_split: Optional[str] = None  # Shared Stage 1 / Stage 2 LIBERO-Object split preset
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 50                    # Number of rollouts per task
     initial_states_path: str = "DEFAULT"             # "DEFAULT", or path to initial states JSON file
@@ -128,6 +133,7 @@ class GenerateConfig:
     save_version: str = "vla-adapter"                # version of 
     use_pro_version: bool = True                     # encourage to use the pro models we released.
     phase: str = "Inference"
+    dry_run: bool = False                            # If True, resolve split/config and exit before model init
 
 
 
@@ -142,6 +148,12 @@ def validate_config(cfg: GenerateConfig) -> None:
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
+    if cfg.libero_object_private_split is not None:
+        split = get_private_libero_object_split(cfg.libero_object_private_split)
+        assert cfg.task_suite_name == split.task_suite_name, (
+            f"`--libero_object_private_split {cfg.libero_object_private_split}` requires "
+            f"`--task_suite_name {split.task_suite_name}`."
+        )
 
 
 
@@ -529,6 +541,21 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Set random seed
     set_seed_everywhere(cfg.seed)
 
+    selected_task_infos = None
+    selected_task_ids = None
+    if cfg.libero_object_private_split is not None:
+        selected_task_infos = get_private_libero_object_task_infos(cfg.libero_object_private_split)
+        selected_task_ids = [task.task_id for task in selected_task_infos]
+        logger.info(
+            "Using LIBERO-Object private split `%s`: task_ids=%s",
+            cfg.libero_object_private_split,
+            selected_task_ids,
+        )
+        if cfg.dry_run:
+            for task in selected_task_infos:
+                logger.info("Selected task %d: %s | %s", task.task_id, task.task_name, task.language)
+            return 0.0
+
     # Initialize model and components
     model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
 
@@ -545,13 +572,15 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
-    num_tasks = task_suite.n_tasks
+    if selected_task_ids is None:
+        selected_task_ids = list(range(task_suite.n_tasks))
 
     log_message(f"Task suite: {cfg.task_suite_name}", log_file)
+    log_message(f"Selected task ids: {selected_task_ids}", log_file)
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(num_tasks)):
+    for task_id in tqdm.tqdm(selected_task_ids):
         total_episodes, total_successes = run_task(
             cfg,
             task_suite,
