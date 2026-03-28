@@ -74,7 +74,9 @@ def get_private_libero_object_task_infos(
             f"`{split_name}`: {missing_task_ids}"
         )
 
-    return [tasks_by_id[task_id] for task_id in split.task_ids]
+    task_infos = [tasks_by_id[task_id] for task_id in split.task_ids]
+    _validate_unique_task_languages(task_infos, split_name)
+    return task_infos
 
 
 def build_rlds_private_split_selection(
@@ -118,29 +120,29 @@ def build_private_split_summary(
         "task_languages": [task.language for task in task_infos],
     }
 
-
-def compute_demo_selection_counts(task_languages: Iterable[str], selected_task_languages: Iterable[str], max_demos_per_task: int) -> Dict[str, int]:
-    selected = list(selected_task_languages)
-    counts = {language: 0 for language in selected}
-    seen = {language: 0 for language in selected}
-
-    for language in task_languages:
-        if language not in seen:
-            continue
-        demo_rank = seen[language]
-        seen[language] += 1
-        if demo_rank < max_demos_per_task:
-            counts[language] += 1
-
-    return counts
-
-
 def _validate_demo_ids(demo_ids: tuple[int, ...], field_name: str) -> None:
     expected = tuple(range(len(demo_ids)))
     if demo_ids != expected:
         raise ValueError(
             f"{field_name} must be a zero-based contiguous range for deterministic RLDS filtering. "
             f"Expected {list(expected)}, got {list(demo_ids)}."
+        )
+
+
+def _validate_unique_task_languages(task_infos: List[LiberoTaskInfo], split_name: str) -> None:
+    languages_to_task_ids: Dict[str, List[int]] = {}
+    for task in task_infos:
+        languages_to_task_ids.setdefault(task.language, []).append(task.task_id)
+
+    duplicates = {
+        language: task_ids
+        for language, task_ids in languages_to_task_ids.items()
+        if len(task_ids) > 1
+    }
+    if duplicates:
+        raise ValueError(
+            f"LIBERO-Object private split `{split_name}` requires unique task languages, "
+            f"but found duplicates: {duplicates}"
         )
 
 

@@ -1,4 +1,4 @@
-"""Characterization tests for the current RLDS trajectory selection wiring."""
+"""Regression tests for RLDS trajectory selection wiring."""
 
 import types
 
@@ -57,24 +57,50 @@ class _FakeDataset:
         return self
 
 
-def test_apply_trajectory_selection_does_not_rewrap_scan_output(monkeypatch):
+class _FakeSelectableDataset(_FakeDataset):
+    def __init__(self, name, scan_calls):
+        super().__init__(name)
+        self._scan_calls = scan_calls
+
+    def scan(self, initial_state=None, scan_func=None):
+        self._scan_calls.append(self.name)
+        return _FakeTFDataset()
+
+
+class _WrappedDLDataset:
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def traj_map(self, *args, **kwargs):
+        return self
+
+
+def test_apply_trajectory_selection_rewraps_scan_output(monkeypatch):
     monkeypatch.setattr(rlds_dataset, "tf", _make_fake_tf())
+    monkeypatch.setattr(
+        rlds_dataset,
+        "dl",
+        types.SimpleNamespace(DLataset=_WrappedDLDataset),
+    )
 
     result = rlds_dataset.apply_trajectory_selection(
         _FakeDLDataset(),
         {
+            "dataset_name": "libero_object_no_noops",
             "task_languages": ["language_0"],
             "max_demos_per_task": 40,
             "split_name": "stage1",
             "split_kind": "train",
         },
+        dataset_name="libero_object_no_noops",
     )
 
-    assert isinstance(result, _FakeTFDataset)
-    assert not hasattr(result, "traj_map")
+    assert isinstance(result, _WrappedDLDataset)
+    assert isinstance(result.dataset, _FakeTFDataset)
+    assert hasattr(result, "traj_map")
 
 
-def test_make_interleaved_dataset_disables_shuffle_for_all_datasets_when_selection_is_enabled(monkeypatch):
+def test_make_interleaved_dataset_only_disables_shuffle_for_selected_dataset(monkeypatch):
     shuffle_calls = []
 
     monkeypatch.setattr(rlds_dataset, "allocate_threads", lambda total, weights: [1] * len(weights))
@@ -86,7 +112,11 @@ def test_make_interleaved_dataset_disables_shuffle_for_all_datasets_when_selecti
         return _FakeDataset(name), {"num_transitions": 1}
 
     monkeypatch.setattr(rlds_dataset, "make_dataset_from_rlds", fake_make_dataset_from_rlds)
-    monkeypatch.setattr(rlds_dataset, "apply_trajectory_selection", lambda dataset, trajectory_selection: dataset)
+    monkeypatch.setattr(
+        rlds_dataset,
+        "apply_trajectory_selection",
+        lambda dataset, trajectory_selection, dataset_name: dataset,
+    )
     monkeypatch.setattr(rlds_dataset, "apply_trajectory_transforms", lambda dataset, **kwargs: dataset)
     monkeypatch.setattr(rlds_dataset, "apply_per_dataset_frame_transforms", lambda dataset, **kwargs: dataset)
     monkeypatch.setattr(rlds_dataset, "apply_frame_transforms", lambda dataset, **kwargs: dataset)
@@ -111,6 +141,7 @@ def test_make_interleaved_dataset_disables_shuffle_for_all_datasets_when_selecti
         traj_transform_kwargs={},
         frame_transform_kwargs={},
         trajectory_selection={
+            "dataset_name": "libero_object_no_noops",
             "task_languages": ["language_0"],
             "max_demos_per_task": 40,
             "split_name": "stage1",
@@ -121,25 +152,21 @@ def test_make_interleaved_dataset_disables_shuffle_for_all_datasets_when_selecti
     second_pass_calls = shuffle_calls[2:]
     assert second_pass_calls == [
         ("libero_object_no_noops", False),
-        ("bridge_orig", False),
+        ("bridge_orig", True),
     ]
 
 
-def test_make_interleaved_dataset_applies_selection_to_every_dataset_in_mix(monkeypatch):
-    selection_calls = []
+def test_make_interleaved_dataset_only_applies_selection_to_selected_dataset(monkeypatch):
+    scan_calls = []
 
     monkeypatch.setattr(rlds_dataset, "allocate_threads", lambda total, weights: [1] * len(weights))
     monkeypatch.setattr(rlds_dataset, "pprint_data_mixture", lambda dataset_kwargs_list, sample_weights: None)
     monkeypatch.setattr(rlds_dataset.overwatch, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(rlds_dataset, "tf", _make_fake_tf())
     monkeypatch.setattr(
         rlds_dataset,
         "make_dataset_from_rlds",
-        lambda name, train, shuffle=True, **kwargs: (_FakeDataset(name), {"num_transitions": 1}),
-    )
-    monkeypatch.setattr(
-        rlds_dataset,
-        "apply_trajectory_selection",
-        lambda dataset, trajectory_selection: selection_calls.append(dataset.name) or dataset,
+        lambda name, train, shuffle=True, **kwargs: (_FakeSelectableDataset(name, scan_calls), {"num_transitions": 1}),
     )
     monkeypatch.setattr(rlds_dataset, "apply_trajectory_transforms", lambda dataset, **kwargs: dataset)
     monkeypatch.setattr(rlds_dataset, "apply_per_dataset_frame_transforms", lambda dataset, **kwargs: dataset)
@@ -148,8 +175,15 @@ def test_make_interleaved_dataset_applies_selection_to_every_dataset_in_mix(monk
         rlds_dataset,
         "dl",
         types.SimpleNamespace(
-            DLataset=types.SimpleNamespace(
-                sample_from_datasets=lambda datasets, sample_weights: _FakeDataset("sampled")
+            DLataset=type(
+                "FakeDLDataset",
+                (),
+                {
+                    "__init__": lambda self, dataset: setattr(self, "dataset", dataset),
+                    "repeat": lambda self: self,
+                    "flatten": lambda self, num_parallel_calls=None: self,
+                    "sample_from_datasets": staticmethod(lambda datasets, sample_weights: _FakeDataset("sampled")),
+                },
             )
         ),
     )
@@ -165,6 +199,7 @@ def test_make_interleaved_dataset_applies_selection_to_every_dataset_in_mix(monk
         traj_transform_kwargs={},
         frame_transform_kwargs={},
         trajectory_selection={
+            "dataset_name": "libero_object_no_noops",
             "task_languages": ["language_0"],
             "max_demos_per_task": 40,
             "split_name": "stage1",
@@ -172,4 +207,4 @@ def test_make_interleaved_dataset_applies_selection_to_every_dataset_in_mix(monk
         },
     )
 
-    assert selection_calls == ["libero_object_no_noops", "bridge_orig"]
+    assert scan_calls == ["libero_object_no_noops"]

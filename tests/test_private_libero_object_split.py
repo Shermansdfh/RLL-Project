@@ -2,7 +2,6 @@ from experiments.robot.libero.private_object_split import (
     LiberoTaskInfo,
     build_private_split_summary,
     build_rlds_private_split_selection,
-    compute_demo_selection_counts,
     get_private_libero_object_split,
 )
 
@@ -42,33 +41,7 @@ def test_stage2_private_split_definition():
     assert val_selection["max_demos_per_task"] == 10
 
 
-def test_demo_selection_counts_are_capped_per_task():
-    train_counts = compute_demo_selection_counts(
-        (
-            ["language_0"] * 55
-            + ["language_1"] * 12
-            + ["language_2"] * 44
-            + ["language_8"] * 100
-        ),
-        ["language_0", "language_1", "language_2"],
-        40,
-    )
-    val_counts = compute_demo_selection_counts(
-        (
-            ["language_0"] * 55
-            + ["language_1"] * 12
-            + ["language_2"] * 44
-            + ["language_8"] * 100
-        ),
-        ["language_0", "language_1", "language_2"],
-        10,
-    )
-
-    assert train_counts == {"language_0": 40, "language_1": 12, "language_2": 40}
-    assert val_counts == {"language_0": 10, "language_1": 10, "language_2": 10}
-
-
-def test_duplicate_task_languages_are_not_validated():
+def test_duplicate_task_languages_are_rejected():
     def duplicate_language_provider(task_suite_name):
         assert task_suite_name == "libero_object"
         return [
@@ -76,8 +49,7 @@ def test_duplicate_task_languages_are_not_validated():
             for task_id in range(10)
         ]
 
-    selection = build_rlds_private_split_selection("stage1", "train", task_provider=duplicate_language_provider)
+    import pytest
 
-    assert selection["task_ids"] == [0, 1, 2]
-    assert selection["task_languages"] == ["shared_language", "shared_language", "shared_language"]
-    assert len(set(selection["task_languages"])) == 1
+    with pytest.raises(ValueError, match="unique task languages"):
+        build_rlds_private_split_selection("stage1", "train", task_provider=duplicate_language_provider)

@@ -35,9 +35,18 @@ overwatch = initialize_overwatch(__name__)
 tf.config.set_visible_devices([], "GPU")
 
 
-def apply_trajectory_selection(dataset: dl.DLataset, trajectory_selection: Optional[Dict]) -> dl.DLataset:
+def trajectory_selection_applies_to_dataset(dataset_name: str, trajectory_selection: Optional[Dict]) -> bool:
+    return trajectory_selection is not None and trajectory_selection["dataset_name"] == dataset_name
+
+
+def apply_trajectory_selection(
+    dataset: dl.DLataset,
+    trajectory_selection: Optional[Dict],
+    *,
+    dataset_name: str,
+) -> dl.DLataset:
     """Deterministically keep only the requested demos for the requested task languages."""
-    if trajectory_selection is None:
+    if not trajectory_selection_applies_to_dataset(dataset_name, trajectory_selection):
         return dataset
 
     task_languages = trajectory_selection["task_languages"]
@@ -86,7 +95,7 @@ def apply_trajectory_selection(dataset: dl.DLataset, trajectory_selection: Optio
     dataset = dataset.scan(initial_state=initial_state, scan_func=_scan_fn)
     dataset = dataset.filter(lambda item: item["keep"])
     dataset = dataset.map(lambda item: item["traj"], num_parallel_calls=tf.data.AUTOTUNE)
-    return dataset
+    return dl.DLataset(dataset)
 
 
 # ruff: noqa: B006
@@ -494,9 +503,9 @@ def make_single_dataset(
     dataset, dataset_statistics = make_dataset_from_rlds(
         **dataset_kwargs,
         train=train,
-        shuffle=trajectory_selection is None,
+        shuffle=not trajectory_selection_applies_to_dataset(dataset_kwargs["name"], trajectory_selection),
     )
-    dataset = apply_trajectory_selection(dataset, trajectory_selection)
+    dataset = apply_trajectory_selection(dataset, trajectory_selection, dataset_name=dataset_kwargs["name"])
     dataset = apply_trajectory_transforms(dataset, **traj_transform_kwargs, train=train)
     dataset = apply_frame_transforms(dataset, **frame_transform_kwargs, train=train)
 
@@ -602,12 +611,12 @@ def make_interleaved_dataset(
         dataset, _ = make_dataset_from_rlds(
             **dataset_kwargs,
             train=train,
-            shuffle=trajectory_selection is None,
+            shuffle=not trajectory_selection_applies_to_dataset(dataset_kwargs["name"], trajectory_selection),
             num_parallel_calls=threads,
             num_parallel_reads=reads,
             dataset_statistics=all_dataset_statistics[dataset_kwargs["name"]],
         )
-        dataset = apply_trajectory_selection(dataset, trajectory_selection)
+        dataset = apply_trajectory_selection(dataset, trajectory_selection, dataset_name=dataset_kwargs["name"])
         dataset = apply_trajectory_transforms(
             dataset.repeat(),
             **traj_transform_kwargs,

@@ -542,6 +542,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
     set_seed_everywhere(cfg.seed)
 
     selected_task_infos = None
+    selected_task_ids = None
     if cfg.libero_object_private_split is not None:
         selected_task_infos = get_private_libero_object_task_infos(cfg.libero_object_private_split)
         selected_task_ids = [task.task_id for task in selected_task_infos]
@@ -571,10 +572,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
-    if selected_task_infos is None:
+    if selected_task_ids is None:
         selected_task_ids = list(range(task_suite.n_tasks))
-    else:
-        selected_task_ids = [task.task_id for task in selected_task_infos]
 
     log_message(f"Task suite: {cfg.task_suite_name}", log_file)
     log_message(f"Selected task ids: {selected_task_ids}", log_file)
