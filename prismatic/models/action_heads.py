@@ -27,17 +27,25 @@ class L1RegressionActionHead(nn.Module):
         action_dim=7,
         num_task_tokens=512,
         use_pro_version=False,
+        use_depth_wise_weighting=False,
+        num_vlm_layers=25,
+        share_depth_weights=False,
+        normalize_aq_before_combination=True,
     ):
         super().__init__()
         self.num_task_tokens = num_task_tokens
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         self.model = MLPResNet(
-            num_blocks=24, 
-            input_dim=input_dim*ACTION_DIM, 
-            hidden_dim=hidden_dim, 
+            num_blocks=24,
+            input_dim=input_dim*ACTION_DIM,
+            hidden_dim=hidden_dim,
             output_dim=action_dim,
-            use_pro_version=use_pro_version
+            use_pro_version=use_pro_version,
+            use_depth_wise_weighting=use_depth_wise_weighting,
+            num_vlm_layers=num_vlm_layers,
+            share_depth_weights=share_depth_weights,
+            normalize_aq_before_combination=normalize_aq_before_combination,
             )
 
     def predict_action(
@@ -84,15 +92,20 @@ class L1RegressionActionHead(nn.Module):
 class MLPResNet(nn.Module):
     """MLP with residual connection blocks."""
     def __init__(
-            self, 
-            num_blocks, 
-            input_dim, 
-            hidden_dim, 
+            self,
+            num_blocks,
+            input_dim,
+            hidden_dim,
             output_dim,
-            use_pro_version=False
+            use_pro_version=False,
+            use_depth_wise_weighting=False,
+            num_vlm_layers=25,
+            share_depth_weights=False,
+            normalize_aq_before_combination=True,
             ):
-        
+
         super().__init__()
+        self.use_depth_wise_weighting = use_depth_wise_weighting
         self.layer_norm1 = nn.LayerNorm(input_dim)
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.relu = nn.ReLU()
@@ -103,22 +116,39 @@ class MLPResNet(nn.Module):
                 self.mlp_resnet_blocks.append(MLPResNetBlock_Pro(dim=hidden_dim))
             else:
                 self.mlp_resnet_blocks.append(MLPResNetBlock(dim=hidden_dim))
-                
+
         self.layer_norm2 = nn.LayerNorm(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
 
+        # Optional depth-wise feature weighting
+        if use_depth_wise_weighting:
+            self.feature_weighting = DepthWiseFeatureWeighting(
+                num_vlm_layers=num_vlm_layers,
+                num_action_head_layers=num_blocks,
+                hidden_dim=hidden_dim,
+                share_weights_across_layers=share_depth_weights,
+                normalize_action_queries=normalize_aq_before_combination,
+            )
+        else:
+            self.feature_weighting = None
 
-    def forward(self, x, h_a=None, h_t=None, p= None):
- 
+
+    def forward(self, x, h_a=None, h_t=None, p=None):
+
         # x: (batch_size, input_dim)
         x = self.layer_norm1(x)  # shape: (batch_size, input_dim)
         x = self.fc1(x)  # shape: (batch_size, hidden_dim)
         x = self.relu(x)  # shape: (batch_size, hidden_dim)
         for i, block in enumerate(self.mlp_resnet_blocks):
-            x = block(x, h_t = h_t[:,i+1,:], h_a = h_a[:,i+1,:], p=p)  # shape: (batch_size, hidden_dim)
+            if self.feature_weighting is not None:
+                h_t_i, h_a_i = self.feature_weighting(h_t, h_a, layer_idx=i)
+            else:
+                h_t_i = h_t[:, i+1, :]
+                h_a_i = h_a[:, i+1, :]
+            x = block(x, h_t=h_t_i, h_a=h_a_i, p=p)  # shape: (batch_size, hidden_dim)
         x = self.layer_norm2(x)  # shape: (batch_size, hidden_dim)
         x = self.fc2(x)  # shape: (batch_size, output_dim)
-        return x   
+        return x
 
 
 
@@ -162,6 +192,89 @@ class RotaryPositionEmbedding(nn.Module):
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # (T, dim/2)
         emb = torch.cat([freqs, freqs], dim=-1)            # (T, dim)
         return emb.cos().to(dtype), emb.sin().to(dtype)
+
+
+
+class DepthWiseFeatureWeighting(nn.Module):
+    """
+    Learnable linear combination of VLM layer features for Bridge Attention inputs.
+
+    For each action-head transformer layer, produces a weighted combination of
+    LayerNorm-ed features from all VLM layers, with separate weights for
+    raw K/V (task features) and ActionQueries (action features).
+
+    Args:
+        num_vlm_layers: Number of VLM hidden-state layers available (e.g. 25 for a 24-layer LLM).
+        num_action_head_layers: Number of action-head transformer blocks.
+        hidden_dim: Feature dimension of VLM hidden states.
+        share_weights_across_layers: If True, all action-head layers share the same
+            mixing weights; otherwise each layer learns its own.
+        normalize_action_queries: If True, ActionQueries are LayerNorm-ed before
+            the linear combination; if False, the raw (un-normalized) ActionQueries
+            are combined (LayerNorm modules are still created but bypassed).
+    """
+
+    def __init__(
+        self,
+        num_vlm_layers: int,
+        num_action_head_layers: int,
+        hidden_dim: int,
+        share_weights_across_layers: bool = False,
+        normalize_action_queries: bool = True,
+    ):
+        super().__init__()
+        self.num_vlm_layers = num_vlm_layers
+        self.share_weights_across_layers = share_weights_across_layers
+        self.normalize_action_queries = normalize_action_queries
+
+        # Per-VLM-layer LayerNorm for raw K/V features
+        self.kv_layer_norms = nn.ModuleList(
+            [nn.LayerNorm(hidden_dim) for _ in range(num_vlm_layers)]
+        )
+
+        # Per-VLM-layer LayerNorm for ActionQueries
+        self.aq_layer_norms = nn.ModuleList(
+            [nn.LayerNorm(hidden_dim) for _ in range(num_vlm_layers)]
+        )
+
+        # Learnable mixing-weight logits (softmax-ed before use)
+        num_weight_sets = 1 if share_weights_across_layers else num_action_head_layers
+        self.kv_weight_logits = nn.Parameter(torch.zeros(num_weight_sets, num_vlm_layers))
+        self.aq_weight_logits = nn.Parameter(torch.zeros(num_weight_sets, num_vlm_layers))
+
+    def forward(self, h_t_all, h_a_all, layer_idx: int):
+        """
+        Args:
+            h_t_all: (batch, num_vlm_layers, num_patches, hidden_dim) — raw K/V from all VLM layers.
+            h_a_all: (batch, num_vlm_layers, num_tokens, hidden_dim) — ActionQueries from all VLM layers.
+            layer_idx: Which action-head layer is requesting features.
+
+        Returns:
+            h_t_combined: (batch, num_patches, hidden_dim)
+            h_a_combined: (batch, num_tokens, hidden_dim)
+        """
+        weight_idx = 0 if self.share_weights_across_layers else layer_idx
+
+        # --- Raw K/V combination ---
+        kv_weights = torch.softmax(self.kv_weight_logits[weight_idx], dim=0)  # (L,)
+        h_t_normed = torch.stack(
+            [self.kv_layer_norms[i](h_t_all[:, i]) for i in range(self.num_vlm_layers)],
+            dim=1,
+        )  # (batch, L, num_patches, dim)
+        h_t_combined = torch.einsum("l, blpd -> bpd", kv_weights, h_t_normed)
+
+        # --- ActionQueries combination ---
+        aq_weights = torch.softmax(self.aq_weight_logits[weight_idx], dim=0)  # (L,)
+        if self.normalize_action_queries:
+            h_a_sources = torch.stack(
+                [self.aq_layer_norms[i](h_a_all[:, i]) for i in range(self.num_vlm_layers)],
+                dim=1,
+            )
+        else:
+            h_a_sources = h_a_all  # use raw, un-normalized ActionQueries
+        h_a_combined = torch.einsum("l, bltd -> btd", aq_weights, h_a_sources)
+
+        return h_t_combined, h_a_combined
 
 
 

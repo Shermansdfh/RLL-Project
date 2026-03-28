@@ -125,6 +125,11 @@ class FinetuneConfig:
     # revision version
     use_pro_version: bool = True                             # the version number
     phase: str = "Training"
+
+    # Depth-wise feature weighting (learnable linear combination across VLM layers)
+    use_depth_wise_weighting: bool = False                   # If True, uses learnable layer-wise mixing
+    share_depth_weights: bool = False                        # If True, all action-head layers share mixing weights
+    normalize_aq_before_combination: bool = True             # If True, LayerNorm ActionQueries before combining
     # fmt: on
 
 
@@ -887,10 +892,13 @@ def finetune(cfg: FinetuneConfig) -> None:
         cfg,
         device_id,
         {
-            "input_dim": vla.module.llm_dim, 
-            "hidden_dim": vla.module.llm_dim, 
+            "input_dim": vla.module.llm_dim,
+            "hidden_dim": vla.module.llm_dim,
             "action_dim": ACTION_DIM,
             "use_pro_version": cfg.use_pro_version,
+            "use_depth_wise_weighting": cfg.use_depth_wise_weighting,
+            "share_depth_weights": cfg.share_depth_weights,
+            "normalize_aq_before_combination": cfg.normalize_aq_before_combination,
             },
         to_bf16=True,
         )
