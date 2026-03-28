@@ -154,6 +154,7 @@ class RLDSDataset(IterableDataset):
         shuffle_buffer_size: int = 256_000,
         train: bool = True,
         image_aug: bool = False,
+        trajectory_selection: Dict[str, Any] | None = None,
     ) -> None:
         """Lightweight wrapper around RLDS TFDS Pipeline for use with PyTorch/OpenVLA Data Loaders."""
         self.data_root_dir, self.data_mix, self.batch_transform = data_root_dir, data_mix, batch_transform
@@ -198,6 +199,7 @@ class RLDSDataset(IterableDataset):
             traj_transform_threads=len(mixture_spec),
             traj_read_threads=len(mixture_spec),
             train=train,
+            trajectory_selection=trajectory_selection,
         )
 
         # If applicable, enable image augmentations

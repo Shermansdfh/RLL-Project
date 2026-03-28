@@ -74,6 +74,7 @@ class FinetuneConfig:
     # Dataset
     data_root_dir: Path = Path("datasets/rlds")      # Directory containing RLDS datasets
     dataset_name: str = "aloha_scoop_x_into_bowl"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    libero_object_private_split: Optional[str] = None  # Shared Stage 1 / Stage 2 LIBERO-Object split preset
     run_root_dir: Path = Path("runs")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
@@ -125,6 +126,7 @@ class FinetuneConfig:
     # revision version
     use_pro_version: bool = True                             # the version number
     phase: str = "Training"
+    dry_run: bool = False                                    # If True, resolve split/config and exit before model init
     # fmt: on
 
 
@@ -189,6 +191,33 @@ def get_run_id(cfg) -> str:
         if cfg.run_id_note is not None:
             run_id += f"--{cfg.run_id_note}"
     return run_id
+
+
+
+def resolve_private_libero_object_selection(cfg: FinetuneConfig, split_kind: str) -> Optional[Dict]:
+    if cfg.libero_object_private_split is None:
+        return None
+
+    from experiments.robot.libero.private_object_split import (
+        LIBERO_OBJECT_DATASET_NAME,
+        build_private_split_summary,
+        build_rlds_private_split_selection,
+    )
+
+    if cfg.dataset_name != LIBERO_OBJECT_DATASET_NAME:
+        raise ValueError(
+            "The `--libero_object_private_split` option only supports the LIBERO-Object RLDS dataset "
+            f"(`{LIBERO_OBJECT_DATASET_NAME}`), but received `{cfg.dataset_name}`."
+        )
+
+    summary = build_private_split_summary(cfg.libero_object_private_split)
+    selection = build_rlds_private_split_selection(cfg.libero_object_private_split, split_kind=split_kind)
+
+    print(
+        f"Using LIBERO-Object private split `{summary['split_name']}` for {split_kind}: "
+        f"task_ids={summary['task_ids']}, demos_per_task={len(selection['selected_demo_ids'])}"
+    )
+    return selection
 
 
 
@@ -713,6 +742,15 @@ def finetune(cfg: FinetuneConfig) -> None:
     cfg.config_file_path = cfg.config_file_path.rstrip("/")
     print(f"Fine-tuning OpenVLA Model `{cfg.config_file_path}` on `{cfg.dataset_name}`")
 
+    train_trajectory_selection = resolve_private_libero_object_selection(cfg, split_kind="train")
+    val_trajectory_selection = (
+        resolve_private_libero_object_selection(cfg, split_kind="val") if cfg.use_val_set else None
+    )
+
+    if cfg.dry_run:
+        print("Dry run enabled; exiting before model and dataset initialization.")
+        return
+
     # Get experiment run ID
     run_id = get_run_id(cfg)
 
@@ -965,6 +1003,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         resize_resolution=tuple(vla.module.config.image_sizes),
         shuffle_buffer_size=cfg.shuffle_buffer_size,
         image_aug=cfg.image_aug,
+        trajectory_selection=train_trajectory_selection,
     )
     if cfg.use_val_set:
         val_dataset = RLDSDataset(
@@ -975,6 +1014,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             shuffle_buffer_size=cfg.shuffle_buffer_size // 10,
             image_aug=cfg.image_aug,
             train=False,
+            trajectory_selection=val_trajectory_selection,
         )
 
     # [Important] Save dataset statistics so that we can unnormalize actions during inference

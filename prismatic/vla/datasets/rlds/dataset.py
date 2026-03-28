@@ -35,6 +35,60 @@ overwatch = initialize_overwatch(__name__)
 tf.config.set_visible_devices([], "GPU")
 
 
+def apply_trajectory_selection(dataset: dl.DLataset, trajectory_selection: Optional[Dict]) -> dl.DLataset:
+    """Deterministically keep only the requested demos for the requested task languages."""
+    if trajectory_selection is None:
+        return dataset
+
+    task_languages = trajectory_selection["task_languages"]
+    max_demos_per_task = trajectory_selection["max_demos_per_task"]
+    split_name = trajectory_selection["split_name"]
+    split_kind = trajectory_selection["split_kind"]
+
+    if not task_languages:
+        raise ValueError("trajectory_selection requires at least one task language.")
+    if max_demos_per_task <= 0:
+        raise ValueError("trajectory_selection.max_demos_per_task must be positive.")
+
+    overwatch.info(
+        "Applying trajectory selection for split `%s` (%s): %d tasks, %d demos per task",
+        split_name,
+        split_kind,
+        len(task_languages),
+        max_demos_per_task,
+    )
+
+    keys_tensor = tf.constant(task_languages, dtype=tf.string)
+    values_tensor = tf.range(len(task_languages), dtype=tf.int64)
+    task_lookup = tf.lookup.StaticHashTable(
+        tf.lookup.KeyValueTensorInitializer(keys_tensor, values_tensor),
+        default_value=tf.constant(-1, dtype=tf.int64),
+    )
+
+    initial_state = tf.zeros([len(task_languages)], dtype=tf.int64)
+
+    def _scan_fn(state, traj):
+        language = traj["task"]["language_instruction"][0]
+        task_idx = task_lookup.lookup(language)
+        is_selected_task = task_idx >= 0
+
+        def _selected_payload():
+            demo_rank = tf.gather(state, task_idx)
+            updated_state = tf.tensor_scatter_nd_add(state, [[task_idx]], [1])
+            return updated_state, demo_rank < max_demos_per_task
+
+        def _unselected_payload():
+            return state, tf.constant(False)
+
+        next_state, keep = tf.cond(is_selected_task, _selected_payload, _unselected_payload)
+        return next_state, {"traj": traj, "keep": keep}
+
+    dataset = dataset.scan(initial_state=initial_state, scan_func=_scan_fn)
+    dataset = dataset.filter(lambda item: item["keep"])
+    dataset = dataset.map(lambda item: item["traj"], num_parallel_calls=tf.data.AUTOTUNE)
+    return dataset
+
+
 # ruff: noqa: B006
 def make_dataset_from_rlds(
     name: str,
@@ -427,6 +481,7 @@ def make_single_dataset(
     train: bool,
     traj_transform_kwargs: dict = {},
     frame_transform_kwargs: dict = {},
+    trajectory_selection: Optional[Dict] = None,
 ) -> dl.DLataset:
     """Creates a single dataset from kwargs. Returns a dataset of trajectories.
 
@@ -439,7 +494,9 @@ def make_single_dataset(
     dataset, dataset_statistics = make_dataset_from_rlds(
         **dataset_kwargs,
         train=train,
+        shuffle=trajectory_selection is None,
     )
+    dataset = apply_trajectory_selection(dataset, trajectory_selection)
     dataset = apply_trajectory_transforms(dataset, **traj_transform_kwargs, train=train)
     dataset = apply_frame_transforms(dataset, **frame_transform_kwargs, train=train)
 
@@ -463,6 +520,7 @@ def make_interleaved_dataset(
     balance_weights: bool = False,
     traj_transform_threads: Optional[int] = None,
     traj_read_threads: Optional[int] = None,
+    trajectory_selection: Optional[Dict] = None,
 ) -> dl.DLataset:
     """
     Creates an interleaved dataset from list of dataset configs (kwargs). Returns a dataset of batched frames.
@@ -544,10 +602,12 @@ def make_interleaved_dataset(
         dataset, _ = make_dataset_from_rlds(
             **dataset_kwargs,
             train=train,
+            shuffle=trajectory_selection is None,
             num_parallel_calls=threads,
             num_parallel_reads=reads,
             dataset_statistics=all_dataset_statistics[dataset_kwargs["name"]],
         )
+        dataset = apply_trajectory_selection(dataset, trajectory_selection)
         dataset = apply_trajectory_transforms(
             dataset.repeat(),
             **traj_transform_kwargs,
