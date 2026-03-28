@@ -1,3 +1,7 @@
+"""
+Only used by evaluate_calvin.py
+"""
+
 import torch
 import torchvision.transforms as T
 import torch.nn.functional as F
