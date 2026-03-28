@@ -3,11 +3,11 @@
 Shared Stage 1 and Stage 2 presets are supported by:
 
 - [`vla-scripts/finetune.py`](../vla-scripts/finetune.py)
-- [`experiments/robot/libero/run_libero_eval.py`](../experiments/robot/libero/run_libero_eval.py)
+- [`experiments/robot/libero/run_libero_eval.py`](robot/libero/run_libero_eval.py)
 
 The shared split definition lives in:
 
-- [`experiments/robot/libero/private_object_split.py`](../experiments/robot/libero/private_object_split.py)
+- [`experiments/robot/libero/private_object_split.py`](robot/libero/private_object_split.py)
 
 ## Presets
 

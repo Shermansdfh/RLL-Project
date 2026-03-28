@@ -228,12 +228,7 @@ We use the `Prismatic-VLMs` architecture. Since the file is large, please downlo
 
 ### :bookmark_tabs: Private LIBERO-Object Split Presets
 
-`vla-scripts/finetune.py` and `experiments/robot/libero/run_libero_eval.py` now share the same `--libero_object_private_split` presets for `libero_object`:
-
-- `stage1`: task IDs `[0, 1, 2]`, `40` train demos per task, `10` val demos per task
-- `stage2`: all `10` tasks in `libero_object`, `40` train demos per task, `10` val demos per task
-
-Use these presets only with `--dataset_name libero_object_no_noops` for fine-tuning and `--task_suite_name libero_object` for rollout evaluation. If you want to sanity check the resolved split without launching training or evaluation, both entry points also support `--dry_run True`.
+`vla-scripts/finetune.py` and `experiments/robot/libero/run_libero_eval.py` share `--libero_object_private_split` presets (`stage1`, `stage2`) for `libero_object`. See [`experiments/private-libero-object-splits.md`](experiments/private-libero-object-splits.md) for full usage details, commands, and preset definitions.
 
 
 ### :ledger: How to Train on Extremely Limited VRAM GPUs
