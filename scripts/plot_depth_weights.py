@@ -35,9 +35,9 @@ def load_weights(checkpoint_path: str):
     kv_logits = state_dict[kv_key]  # (num_action_layers, 25) or (1, 25)
     aq_logits = state_dict[aq_key]
 
-    # Convert logits -> softmax weights
-    kv_weights = torch.softmax(kv_logits, dim=-1).numpy()  # (W, 25)
-    aq_weights = torch.softmax(aq_logits, dim=-1).numpy()
+    # Convert logits -> softmax weights (cast to float32 for numpy compatibility)
+    kv_weights = torch.softmax(kv_logits.float(), dim=-1).numpy()  # (W, 25)
+    aq_weights = torch.softmax(aq_logits.float(), dim=-1).numpy()
 
     print(f"Loaded from: {checkpoint_path}")
     print(f"  kv_weight_logits shape: {kv_logits.shape}")
