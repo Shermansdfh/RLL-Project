@@ -36,6 +36,11 @@ checkpoint_dir=outputs/LIBERO-Object-Private-${split}
 ## Train
 
 ```bash
+data_name=libero_object_no_noops
+split=stage1
+project_name=LIBERO-Object-DW-Private-${split}
+current_time=$(date +%Y%m%d_%H%M%S)
+
 CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
   --vlm_path pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b \
   --config_file_path pretrained_models/configs \
@@ -62,7 +67,8 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-s
   --use_pro_version True \
   --wandb_entity "YOUR_WANDB_ENTITY" \
   --wandb_project "$project_name" \
-  --run_id_note ${project_name}--train--$current_time
+  --run_id_note ${project_name}--train--$current_time \
+  > logs/VLA-Adapter--${data_name}--${split}--${current_time}.log 2>&1 &
 ```
 
 ## Validation
