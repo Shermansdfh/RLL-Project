@@ -139,9 +139,14 @@ class MLPResNet(nn.Module):
         x = self.layer_norm1(x)  # shape: (batch_size, input_dim)
         x = self.fc1(x)  # shape: (batch_size, hidden_dim)
         x = self.relu(x)  # shape: (batch_size, hidden_dim)
+
+        # Precompute normalized features once (avoids 24x redundant LayerNorm)
+        if self.feature_weighting is not None:
+            h_t_normed, h_a_sources = self.feature_weighting.normalize_all(h_t, h_a)
+
         for i, block in enumerate(self.mlp_resnet_blocks):
             if self.feature_weighting is not None:
-                h_t_i, h_a_i = self.feature_weighting(h_t, h_a, layer_idx=i)
+                h_t_i, h_a_i = self.feature_weighting.combine(h_t_normed, h_a_sources, layer_idx=i)
             else:
                 h_t_i = h_t[:, i+1, :]
                 h_a_i = h_a[:, i+1, :]
@@ -242,39 +247,60 @@ class DepthWiseFeatureWeighting(nn.Module):
         self.kv_weight_logits = nn.Parameter(torch.zeros(num_weight_sets, num_vlm_layers))
         self.aq_weight_logits = nn.Parameter(torch.zeros(num_weight_sets, num_vlm_layers))
 
-    def forward(self, h_t_all, h_a_all, layer_idx: int):
+    def normalize_all(self, h_t_all, h_a_all):
         """
+        Precompute LayerNorm-ed features for all VLM layers.  Call ONCE per
+        forward pass, then use ``combine()`` inside the per-block loop.
+
         Args:
-            h_t_all: (batch, num_vlm_layers, num_patches, hidden_dim) — raw K/V from all VLM layers.
-            h_a_all: (batch, num_vlm_layers, num_tokens, hidden_dim) — ActionQueries from all VLM layers.
-            layer_idx: Which action-head layer is requesting features.
+            h_t_all: (batch, L, num_patches, dim) — raw K/V from all VLM layers.
+            h_a_all: (batch, L, num_tokens, dim)  — ActionQueries from all VLM layers.
 
         Returns:
-            h_t_combined: (batch, num_patches, hidden_dim)
-            h_a_combined: (batch, num_tokens, hidden_dim)
+            h_t_normed:  (batch, L, num_patches, dim)
+            h_a_sources: (batch, L, num_tokens, dim) — normed or raw, per config.
         """
-        weight_idx = 0 if self.share_weights_across_layers else layer_idx
-
-        # --- Raw K/V combination ---
-        kv_weights = torch.softmax(self.kv_weight_logits[weight_idx], dim=0)  # (L,)
         h_t_normed = torch.stack(
             [self.kv_layer_norms[i](h_t_all[:, i]) for i in range(self.num_vlm_layers)],
             dim=1,
-        )  # (batch, L, num_patches, dim)
-        h_t_combined = torch.einsum("l, blpd -> bpd", kv_weights, h_t_normed)
-
-        # --- ActionQueries combination ---
-        aq_weights = torch.softmax(self.aq_weight_logits[weight_idx], dim=0)  # (L,)
+        )
         if self.normalize_action_queries:
             h_a_sources = torch.stack(
                 [self.aq_layer_norms[i](h_a_all[:, i]) for i in range(self.num_vlm_layers)],
                 dim=1,
             )
         else:
-            h_a_sources = h_a_all  # use raw, un-normalized ActionQueries
+            h_a_sources = h_a_all
+        return h_t_normed, h_a_sources
+
+    def combine(self, h_t_normed, h_a_sources, layer_idx: int):
+        """
+        Cheap weighted sum for a single action-head block (no LayerNorm here).
+
+        Args:
+            h_t_normed:  (batch, L, num_patches, dim) — from ``normalize_all()``.
+            h_a_sources: (batch, L, num_tokens, dim)  — from ``normalize_all()``.
+            layer_idx: Which action-head block is requesting features.
+
+        Returns:
+            h_t_combined: (batch, num_patches, dim)
+            h_a_combined: (batch, num_tokens, dim)
+        """
+        weight_idx = 0 if self.share_weights_across_layers else layer_idx
+
+        kv_weights = torch.softmax(self.kv_weight_logits[weight_idx], dim=0)
+        h_t_combined = torch.einsum("l, blpd -> bpd", kv_weights, h_t_normed)
+
+        aq_weights = torch.softmax(self.aq_weight_logits[weight_idx], dim=0)
         h_a_combined = torch.einsum("l, bltd -> btd", aq_weights, h_a_sources)
 
         return h_t_combined, h_a_combined
+
+    def forward(self, h_t_all, h_a_all, layer_idx: int):
+        """Single-call convenience (normalize + combine).  Prefer
+        ``normalize_all()`` + ``combine()`` in a loop to avoid redundant work."""
+        h_t_normed, h_a_sources = self.normalize_all(h_t_all, h_a_all)
+        return self.combine(h_t_normed, h_a_sources, layer_idx)
 
 
 
