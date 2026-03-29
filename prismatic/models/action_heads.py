@@ -252,6 +252,8 @@ class DepthWiseFeatureWeighting(nn.Module):
         Precompute LayerNorm-ed features for all VLM layers.  Call ONCE per
         forward pass, then use ``combine()`` inside the per-block loop.
 
+        Fully vectorized — no Python loop, single fused kernel per feature type.
+
         Args:
             h_t_all: (batch, L, num_patches, dim) — raw K/V from all VLM layers.
             h_a_all: (batch, L, num_tokens, dim)  — ActionQueries from all VLM layers.
@@ -260,17 +262,25 @@ class DepthWiseFeatureWeighting(nn.Module):
             h_t_normed:  (batch, L, num_patches, dim)
             h_a_sources: (batch, L, num_tokens, dim) — normed or raw, per config.
         """
-        h_t_normed = torch.stack(
-            [self.kv_layer_norms[i](h_t_all[:, i]) for i in range(self.num_vlm_layers)],
-            dim=1,
-        )
+        eps = self.kv_layer_norms[0].eps
+
+        # --- Vectorized K/V normalization ---
+        kv_w = torch.stack([ln.weight for ln in self.kv_layer_norms])  # (L, D)
+        kv_b = torch.stack([ln.bias for ln in self.kv_layer_norms])    # (L, D)
+        mean_t = h_t_all.mean(dim=-1, keepdim=True)
+        rstd_t = torch.rsqrt(h_t_all.var(dim=-1, keepdim=True, unbiased=False) + eps)
+        h_t_normed = (h_t_all - mean_t) * rstd_t * kv_w[None, :, None, :] + kv_b[None, :, None, :]
+
+        # --- Vectorized AQ normalization ---
         if self.normalize_action_queries:
-            h_a_sources = torch.stack(
-                [self.aq_layer_norms[i](h_a_all[:, i]) for i in range(self.num_vlm_layers)],
-                dim=1,
-            )
+            aq_w = torch.stack([ln.weight for ln in self.aq_layer_norms])  # (L, D)
+            aq_b = torch.stack([ln.bias for ln in self.aq_layer_norms])    # (L, D)
+            mean_a = h_a_all.mean(dim=-1, keepdim=True)
+            rstd_a = torch.rsqrt(h_a_all.var(dim=-1, keepdim=True, unbiased=False) + eps)
+            h_a_sources = (h_a_all - mean_a) * rstd_a * aq_w[None, :, None, :] + aq_b[None, :, None, :]
         else:
             h_a_sources = h_a_all
+
         return h_t_normed, h_a_sources
 
     def combine(self, h_t_normed, h_a_sources, layer_idx: int):
