@@ -4,6 +4,7 @@ Plot learned depth-wise feature weighting from a checkpoint.
 Usage:
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --save_dir figures/
+    python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --no_avg
 """
 
 import argparse
@@ -59,11 +60,23 @@ def classify_layers(num_action_layers: int):
     }
 
 
-def plot_weights(weights: np.ndarray, title: str, ax: plt.Axes, num_vlm_layers: int):
+def pick_representative_layers(num_action_layers: int):
+    """Pick one shallow, one mid, one deep layer index."""
+    mid = num_action_layers // 2
+    return {
+        f"Shallow (layer 1)": 1,
+        f"Mid (layer {mid})": mid,
+        f"Deep (layer {num_action_layers - 1})": num_action_layers - 1,
+    }
+
+
+def plot_weights(weights: np.ndarray, title: str, ax: plt.Axes, num_vlm_layers: int,
+                 no_avg: bool = False):
     """
-    Plot heatmap + average curves for shallow/mid/deep action head layers.
+    Plot weight curves for shallow/mid/deep action head layers.
 
     weights: (num_action_layers, num_vlm_layers)
+    no_avg: If True, plot individual representative layers instead of group averages.
     """
     num_action_layers = weights.shape[0]
     vlm_layer_labels = ["emb"] + [str(i) for i in range(1, num_vlm_layers)]
@@ -80,17 +93,22 @@ def plot_weights(weights: np.ndarray, title: str, ax: plt.Axes, num_vlm_layers: 
         ax.legend(fontsize=8)
         return
 
-    groups = classify_layers(num_action_layers)
-    colors = {"Shallow": "#4C72B0", "Mid": "#DD8452", "Deep": "#55A868"}
+    colors_list = ["#4C72B0", "#DD8452", "#55A868"]
     x = np.arange(num_vlm_layers)
 
-    for group_name, layer_indices in groups.items():
-        group_weights = weights[layer_indices]  # (subset, 25)
-        mean = group_weights.mean(axis=0)
-        std = group_weights.std(axis=0)
-        ax.plot(x, mean, label=f"{group_name} (layers {layer_indices[0]}-{layer_indices[-1]})",
-                color=colors[group_name], lw=2)
-        ax.fill_between(x, mean - std, mean + std, alpha=0.15, color=colors[group_name])
+    if no_avg:
+        representatives = pick_representative_layers(num_action_layers)
+        for (label, idx), color in zip(representatives.items(), colors_list):
+            ax.plot(x, weights[idx], label=label, color=color, lw=2, marker="o", markersize=3)
+    else:
+        groups = classify_layers(num_action_layers)
+        for (group_name, layer_indices), color in zip(groups.items(), colors_list):
+            group_weights = weights[layer_indices]  # (subset, 25)
+            mean = group_weights.mean(axis=0)
+            std = group_weights.std(axis=0)
+            ax.plot(x, mean, label=f"{group_name} (layers {layer_indices[0]}-{layer_indices[-1]})",
+                    color=color, lw=2)
+            ax.fill_between(x, mean - std, mean + std, alpha=0.15, color=color)
 
     ax.axhline(1.0 / num_vlm_layers, color="gray", ls="--", lw=0.8, label="uniform (1/25)")
     ax.set_xticks(x)
@@ -108,6 +126,8 @@ def main():
                         help="Path to action_head--*_checkpoint.pt")
     parser.add_argument("--save_dir", type=str, default=None,
                         help="Directory to save figures (default: show interactively)")
+    parser.add_argument("--no_avg", action="store_true",
+                        help="Plot individual representative layers (1, mid, last) instead of group averages")
     args = parser.parse_args()
 
     kv_weights, aq_weights = load_weights(args.checkpoint)
@@ -115,8 +135,8 @@ def main():
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
 
-    plot_weights(kv_weights, "Raw KV (Task Features) — Learned Depth Weights", axes[0], num_vlm_layers)
-    plot_weights(aq_weights, "ActionQueries (Action Features) — Learned Depth Weights", axes[1], num_vlm_layers)
+    plot_weights(kv_weights, "Raw KV (Task Features) — Learned Depth Weights", axes[0], num_vlm_layers, no_avg=args.no_avg)
+    plot_weights(aq_weights, "ActionQueries (Action Features) — Learned Depth Weights", axes[1], num_vlm_layers, no_avg=args.no_avg)
 
     fig.suptitle("Depth-Wise Feature Weighting Analysis", fontsize=14, fontweight="bold")
     fig.tight_layout()
