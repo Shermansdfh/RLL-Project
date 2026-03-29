@@ -155,3 +155,4 @@ wandb/
 
 # Claude
 .claude/
+claude_sessions_summary/
