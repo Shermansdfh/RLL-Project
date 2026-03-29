@@ -95,7 +95,14 @@ def apply_trajectory_selection(
     dataset = dataset.scan(initial_state=initial_state, scan_func=_scan_fn)
     dataset = dataset.filter(lambda item: item["keep"])
     dataset = dataset.map(lambda item: item["traj"], num_parallel_calls=tf.data.AUTOTUNE)
-    return dl.DLataset(dataset)
+
+    # After scan/filter/map the result is a plain tf.data.Dataset.
+    # DLataset cannot be instantiated directly; it uses dynamic class
+    # transformation via __class__ reassignment (see dlimp's _wrap()).
+    dataset.__class__ = type(
+        "DLataset", (dl.DLataset, type(dataset)), dl.DLataset.__dict__.copy()
+    )
+    return dataset
 
 
 # ruff: noqa: B006
