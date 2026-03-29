@@ -135,6 +135,11 @@ class GenerateConfig:
     phase: str = "Inference"
     dry_run: bool = False                            # If True, resolve split/config and exit before model init
 
+    # Depth-wise feature weighting (must match training flags)
+    use_depth_wise_weighting: bool = False            # If True, uses learnable layer-wise mixing
+    share_depth_weights: bool = False                 # If True, all action-head layers share mixing weights
+    normalize_aq_before_combination: bool = True      # If True, LayerNorm ActionQueries before combining
+
 
 
 def validate_config(cfg: GenerateConfig) -> None:
