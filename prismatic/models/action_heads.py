@@ -140,13 +140,15 @@ class MLPResNet(nn.Module):
         x = self.fc1(x)  # shape: (batch_size, hidden_dim)
         x = self.relu(x)  # shape: (batch_size, hidden_dim)
 
-        # Precompute normalized features once (avoids 24x redundant LayerNorm)
+        # Precompute all normalized + weighted combinations at once
         if self.feature_weighting is not None:
-            h_t_normed, h_a_sources = self.feature_weighting.normalize_all(h_t, h_a)
+            h_t_combined, h_a_combined = self.feature_weighting.precompute_all(h_t, h_a)
 
         for i, block in enumerate(self.mlp_resnet_blocks):
             if self.feature_weighting is not None:
-                h_t_i, h_a_i = self.feature_weighting.combine(h_t_normed, h_a_sources, layer_idx=i)
+                w_idx = 0 if self.feature_weighting.share_weights_across_layers else i
+                h_t_i = h_t_combined[:, w_idx, :, :]
+                h_a_i = h_a_combined[:, w_idx, :, :]
             else:
                 h_t_i = h_t[:, i+1, :]
                 h_a_i = h_a[:, i+1, :]
@@ -247,20 +249,19 @@ class DepthWiseFeatureWeighting(nn.Module):
         self.kv_weight_logits = nn.Parameter(torch.zeros(num_weight_sets, num_vlm_layers))
         self.aq_weight_logits = nn.Parameter(torch.zeros(num_weight_sets, num_vlm_layers))
 
-    def normalize_all(self, h_t_all, h_a_all):
+    def precompute_all(self, h_t_all, h_a_all):
         """
-        Precompute LayerNorm-ed features for all VLM layers.  Call ONCE per
-        forward pass, then use ``combine()`` inside the per-block loop.
-
-        Fully vectorized — no Python loop, single fused kernel per feature type.
+        Normalize all VLM layers and precompute weighted combinations for every
+        action-head block in one batched operation.  Returns tensors that can be
+        directly indexed by block index — no per-block work needed.
 
         Args:
             h_t_all: (batch, L, num_patches, dim) — raw K/V from all VLM layers.
             h_a_all: (batch, L, num_tokens, dim)  — ActionQueries from all VLM layers.
 
         Returns:
-            h_t_normed:  (batch, L, num_patches, dim)
-            h_a_sources: (batch, L, num_tokens, dim) — normed or raw, per config.
+            h_t_combined: (batch, N, num_patches, dim) — one per action-head block.
+            h_a_combined: (batch, N, num_tokens, dim)  — one per action-head block.
         """
         eps = self.kv_layer_norms[0].eps
 
@@ -277,40 +278,23 @@ class DepthWiseFeatureWeighting(nn.Module):
             aq_b = torch.stack([ln.bias for ln in self.aq_layer_norms])    # (L, D)
             mean_a = h_a_all.mean(dim=-1, keepdim=True)
             rstd_a = torch.rsqrt(h_a_all.var(dim=-1, keepdim=True, unbiased=False) + eps)
-            h_a_sources = (h_a_all - mean_a) * rstd_a * aq_w[None, :, None, :] + aq_b[None, :, None, :]
+            h_a_normed = (h_a_all - mean_a) * rstd_a * aq_w[None, :, None, :] + aq_b[None, :, None, :]
         else:
-            h_a_sources = h_a_all
+            h_a_normed = h_a_all
 
-        return h_t_normed, h_a_sources
+        # --- Batched weighted combination for all action-head layers at once ---
+        # kv_weight_logits: (N, L) or (1, L) if shared
+        kv_weights = torch.softmax(self.kv_weight_logits, dim=-1)   # (N, L)
+        aq_weights = torch.softmax(self.aq_weight_logits, dim=-1)   # (N, L)
 
-    def combine(self, h_t_normed, h_a_sources, layer_idx: int):
-        """
-        Cheap weighted sum for a single action-head block (no LayerNorm here).
+        # Single batched einsum: (N,L) x (B,L,P,D) -> (B,N,P,D)
+        h_t_combined = torch.einsum("nl, blpd -> bnpd", kv_weights, h_t_normed)
+        h_a_combined = torch.einsum("nl, bltd -> bntd", aq_weights, h_a_normed)
 
-        Args:
-            h_t_normed:  (batch, L, num_patches, dim) — from ``normalize_all()``.
-            h_a_sources: (batch, L, num_tokens, dim)  — from ``normalize_all()``.
-            layer_idx: Which action-head block is requesting features.
-
-        Returns:
-            h_t_combined: (batch, num_patches, dim)
-            h_a_combined: (batch, num_tokens, dim)
-        """
-        weight_idx = 0 if self.share_weights_across_layers else layer_idx
-
-        kv_weights = torch.softmax(self.kv_weight_logits[weight_idx], dim=0)
-        h_t_combined = torch.einsum("l, blpd -> bpd", kv_weights, h_t_normed)
-
-        aq_weights = torch.softmax(self.aq_weight_logits[weight_idx], dim=0)
-        h_a_combined = torch.einsum("l, bltd -> btd", aq_weights, h_a_sources)
+        # If weights are shared (N=1), expand to num_action_head_layers isn't
+        # needed — we just index with 0 in the loop.
 
         return h_t_combined, h_a_combined
-
-    def forward(self, h_t_all, h_a_all, layer_idx: int):
-        """Single-call convenience (normalize + combine).  Prefer
-        ``normalize_all()`` + ``combine()`` in a loop to avoid redundant work."""
-        h_t_normed, h_a_sources = self.normalize_all(h_t_all, h_a_all)
-        return self.combine(h_t_normed, h_a_sources, layer_idx)
 
 
 

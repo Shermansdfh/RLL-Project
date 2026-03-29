@@ -98,7 +98,10 @@ h_t_all = torch.randn(BATCH, NUM_VLM_LAYERS, NUM_PATCHES, HIDDEN_DIM)
 h_a_all = torch.randn(BATCH, NUM_VLM_LAYERS, NUM_TOKENS, HIDDEN_DIM)
 
 try:
-    h_t_out, h_a_out = dw(h_t_all, h_a_all, layer_idx=0)
+    h_t_comb, h_a_comb = dw.precompute_all(h_t_all, h_a_all)
+    # h_t_comb: (batch, N, num_patches, dim), h_a_comb: (batch, N, num_tokens, dim)
+    h_t_out = h_t_comb[:, 0, :, :]
+    h_a_out = h_a_comb[:, 0, :, :]
     ok_t = h_t_out.shape == (BATCH, NUM_PATCHES, HIDDEN_DIM)
     ok_a = h_a_out.shape == (BATCH, NUM_TOKENS, HIDDEN_DIM)
     report("DW forward runs", True)
@@ -125,11 +128,10 @@ dw_shared = DepthWiseFeatureWeighting(
     normalize_action_queries=True,
 )
 try:
-    out0 = dw_shared(h_t_all, h_a_all, layer_idx=0)
-    out5 = dw_shared(h_t_all, h_a_all, layer_idx=5)
-    # With shared weights the outputs must be identical for different layer_idx
-    ok = torch.allclose(out0[0], out5[0]) and torch.allclose(out0[1], out5[1])
-    report("Shared-weights mode: layer_idx=0 == layer_idx=5", ok)
+    h_t_sh, h_a_sh = dw_shared.precompute_all(h_t_all, h_a_all)
+    # Shared weights: N=1, so all blocks get the same result
+    ok = h_t_sh.shape[1] == 1 and h_a_sh.shape[1] == 1
+    report("Shared-weights mode: single weight set (N=1)", ok)
 except Exception as e:
     report("Shared-weights forward", False, str(e))
 
@@ -142,11 +144,12 @@ dw_no_norm = DepthWiseFeatureWeighting(
     normalize_action_queries=False,
 )
 try:
-    h_t_nn, h_a_nn = dw_no_norm(h_t_all, h_a_all, layer_idx=0)
+    h_t_nn, h_a_nn = dw_no_norm.precompute_all(h_t_all, h_a_all)
+    h_a_nn_0 = h_a_nn[:, 0, :, :]
     report("normalize_action_queries=False forward runs", True)
     report(
-        f"h_a shape (no-norm): {tuple(h_a_nn.shape)}",
-        h_a_nn.shape == (BATCH, NUM_TOKENS, HIDDEN_DIM),
+        f"h_a shape (no-norm): {tuple(h_a_nn_0.shape)}",
+        h_a_nn_0.shape == (BATCH, NUM_TOKENS, HIDDEN_DIM),
     )
 except Exception as e:
     report("normalize_action_queries=False forward", False, str(e))
