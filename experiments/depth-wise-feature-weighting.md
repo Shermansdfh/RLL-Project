@@ -146,7 +146,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-s
   --image_aug True \
   --num_steps_before_decay 400000 \
   --max_steps 400005 \
-  --save_freq 5000 \
+  --save_freq 500 \
   --save_latest_checkpoint_only False \
   --merge_lora_during_training True \
   --batch_size 1 \
