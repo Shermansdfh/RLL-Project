@@ -1130,7 +1130,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 progress.update()
 
             # Save model checkpoint: either keep latest checkpoint only or all checkpoints
-            if gradient_step_idx > 0 and log_step % cfg.save_freq == 0:
+            if gradient_step_idx > 0 and log_step % cfg.save_freq == 0 and (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 save_training_checkpoint(
                     cfg=cfg,
                     run_dir=run_dir,
@@ -1146,7 +1146,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 )
 
             # Test model on validation set
-            if cfg.use_val_set and log_step > 0 and log_step % cfg.val_freq == 0:
+            if cfg.use_val_set and log_step > 0 and log_step % cfg.val_freq == 0 and (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 run_validation(
                     vla=vla,
                     action_head=action_head,
