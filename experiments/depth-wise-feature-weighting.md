@@ -129,6 +129,7 @@ Adjust `--batch_size` and `--grad_accumulation_steps` to match your GPU VRAM (se
 data_name=libero_object_no_noops
 split=stage1
 project_name=LIBERO-Object-DW-Private-${split}
+current_time=$(date +%Y%m%d_%H%M%S)
 
 CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
   --vlm_path pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b \
@@ -149,7 +150,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-s
   --save_freq 500 \
   --save_latest_checkpoint_only False \
   --merge_lora_during_training True \
-  --batch_size 1 \
+  --batch_size 4 \
   --grad_accumulation_steps 8 \
   --learning_rate 2e-4 \
   --lora_rank 64 \
@@ -159,7 +160,9 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-s
   --normalize_aq_before_combination True \
   --wandb_entity "YOUR_WANDB_ENTITY" \
   --wandb_project "$project_name" \
-  --run_id_note ${project_name}--train--$current_time
+  --run_id_note ${project_name}--train--$current_time \
+  --seed 114 \
+  > logs/VLA-Adapter--${data_name}--${split}--${current_time}.log 2>&1 &
 ```
 
 ### Private Split — Stage 2 (all 10 tasks)
