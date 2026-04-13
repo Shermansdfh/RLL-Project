@@ -7,7 +7,8 @@ and produces diagnostic plots (heatmap, pairwise cosine, entropy per block).
 Usage:
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --save_dir figures/
-    python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --no_avg
+    python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --depth_curves
+    python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --depth_curves --no_avg
 """
 
 import argparse
@@ -119,6 +120,42 @@ def pairwise_cosine(weights: np.ndarray) -> dict:
     }
 
 
+def pairwise_js_divergence(weights: np.ndarray) -> dict:
+    """Pairwise Jensen-Shannon divergence across blocks.
+
+    Args:
+        weights: (B, L) — each row is a probability distribution over VLM layers.
+
+    Returns:
+        dict with (B, B) JS divergence matrix (in [0, 1] using log2),
+        mean/max pairwise JSD.
+    """
+    B = weights.shape[0]
+    w = np.clip(weights, 1e-12, None)
+
+    js_matrix = np.zeros((B, B))
+    for i in range(B):
+        for j in range(i + 1, B):
+            m = 0.5 * (w[i] + w[j])
+            kl_im = np.sum(w[i] * np.log2(w[i] / m))
+            kl_jm = np.sum(w[j] * np.log2(w[j] / m))
+            jsd = 0.5 * (kl_im + kl_jm)
+            js_matrix[i, j] = jsd
+            js_matrix[j, i] = jsd
+
+    triu_idx = np.triu_indices(B, k=1)
+    pairwise_vals = js_matrix[triu_idx]
+
+    mean_jsd = float(pairwise_vals.mean()) if len(pairwise_vals) > 0 else 0.0
+    max_jsd = float(pairwise_vals.max()) if len(pairwise_vals) > 0 else 0.0
+
+    return {
+        "js_matrix": js_matrix,
+        "mean_pairwise_jsd": mean_jsd,
+        "max_pairwise_jsd": max_jsd,
+    }
+
+
 def entropy_metrics(weights: np.ndarray) -> dict:
     """Entropy and top-k mass per block.
 
@@ -156,6 +193,7 @@ def compute_all_metrics(weights: np.ndarray, label: str) -> dict:
     """Compute and print all metrics for one set of weights."""
     dv = depth_variance(weights)
     pc = pairwise_cosine(weights)
+    js = pairwise_js_divergence(weights)
     em = entropy_metrics(weights)
 
     print(f"\n{'=' * 50}")
@@ -166,11 +204,13 @@ def compute_all_metrics(weights: np.ndarray, label: str) -> dict:
     print(f"  Mean pairwise cosine similarity:              {pc['mean_pairwise_cosine']:.4f}")
     print(f"  Min  pairwise cosine similarity:              {pc['min_pairwise_cosine']:.4f}")
     print(f"  Specialization index (1 - mean cosine):       {pc['specialization_index']:.4f}")
+    print(f"  Mean pairwise JS divergence:                  {js['mean_pairwise_jsd']:.6f}")
+    print(f"  Max  pairwise JS divergence:                  {js['max_pairwise_jsd']:.6f}")
     print(f"  Mean normalized entropy (0=sharp, 1=uniform): {em['mean_entropy_norm']:.4f}")
     print(f"  Mean top-1 mass:                              {em['mean_top1_mass']:.4f}")
     print(f"  Mean top-3 mass:                              {em['mean_top3_mass']:.4f}")
 
-    return {"depth_variance": dv, "pairwise_cosine": pc, "entropy": em}
+    return {"depth_variance": dv, "pairwise_cosine": pc, "js_divergence": js, "entropy": em}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -291,29 +331,68 @@ def plot_depth_curves(weights: np.ndarray, title: str, ax: plt.Axes, no_avg: boo
     ax.grid(axis="y", alpha=0.3)
 
 
-def make_plots(weights: np.ndarray, metrics: dict, feature_name: str, no_avg: bool = False):
-    """Create 4-panel figure for one feature type (KV or AQ)."""
+def plot_js_heatmap(js_matrix: np.ndarray, title: str, ax: plt.Axes):
+    """Plot pairwise Jensen-Shannon divergence heatmap across blocks."""
+    B = js_matrix.shape[0]
+    vmax = js_matrix.max() if js_matrix.max() > 0 else 1.0
+    im = ax.imshow(js_matrix, vmin=0, vmax=vmax, cmap="viridis", interpolation="nearest")
+    ax.set_xlabel("DiT Block")
+    ax.set_ylabel("DiT Block")
+    ax.set_title(title)
+    ax.set_xticks(range(B))
+    ax.set_xticklabels(range(B), fontsize=6)
+    ax.set_yticks(range(B))
+    ax.set_yticklabels(range(B), fontsize=6)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="JS Divergence")
+
+
+def make_plots(weights: np.ndarray, metrics: dict, feature_name: str,
+               depth_curves: bool = False, no_avg: bool = False):
+    """Create figure for one feature type (KV or AQ).
+
+    Default 2x2: routing heatmap, cosine heatmap, JS heatmap, entropy/top-k.
+    With --depth_curves: adds a 5th panel (3+2 layout).
+    """
     B, L = weights.shape
     pc = metrics["pairwise_cosine"]
+    js = metrics["js_divergence"]
     em = metrics["entropy"]
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    if depth_curves:
+        fig = plt.figure(figsize=(18, 10))
+        gs = fig.add_gridspec(2, 6, hspace=0.35, wspace=0.4)
+        ax_heatmap = fig.add_subplot(gs[0, 0:2])
+        ax_cosine  = fig.add_subplot(gs[0, 2:4])
+        ax_js      = fig.add_subplot(gs[0, 4:6])
+        ax_entropy = fig.add_subplot(gs[1, 0:3])
+        ax_curves  = fig.add_subplot(gs[1, 3:6])
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+        ax_heatmap = axes[0, 0]
+        ax_cosine  = axes[0, 1]
+        ax_js      = axes[1, 0]
+        ax_entropy = axes[1, 1]
 
-    plot_routing_heatmap(weights, f"{feature_name} — Routing Weights", axes[0, 0])
+    plot_routing_heatmap(weights, f"{feature_name} — Routing Weights", ax_heatmap)
 
     if B > 1:
         plot_cosine_heatmap(pc["cos_matrix"],
                             f"{feature_name} — Pairwise Cosine (spec={pc['specialization_index']:.3f})",
-                            axes[0, 1])
+                            ax_cosine)
+        plot_js_heatmap(js["js_matrix"],
+                        f"{feature_name} — Pairwise JS Div (mean={js['mean_pairwise_jsd']:.4f})",
+                        ax_js)
     else:
-        axes[0, 1].text(0.5, 0.5, "Shared weights\n(single block)",
-                        ha="center", va="center", fontsize=14)
-        axes[0, 1].set_title(f"{feature_name} — Pairwise Cosine")
+        for ax, name in [(ax_cosine, "Pairwise Cosine"), (ax_js, "Pairwise JS Div")]:
+            ax.text(0.5, 0.5, "Shared weights\n(single block)",
+                    ha="center", va="center", fontsize=14)
+            ax.set_title(f"{feature_name} — {name}")
 
     plot_entropy_per_block(em["per_block_entropy_norm"], em["top1_mass"], em["top3_mass"],
-                           f"{feature_name} — Entropy & Top-k Mass", axes[1, 0])
+                           f"{feature_name} — Entropy & Top-k Mass", ax_entropy)
 
-    plot_depth_curves(weights, f"{feature_name} — Depth Weight Curves", axes[1, 1], no_avg=no_avg)
+    if depth_curves:
+        plot_depth_curves(weights, f"{feature_name} — Depth Weight Curves", ax_curves, no_avg=no_avg)
 
     fig.suptitle(f"Depth-Wise Routing Analysis — {feature_name}", fontsize=14, fontweight="bold")
     fig.tight_layout()
@@ -330,8 +409,10 @@ def main():
                         help="Path to action_head--*_checkpoint.pt")
     parser.add_argument("--save_dir", type=str, default=None,
                         help="Directory to save figures (default: show interactively)")
+    parser.add_argument("--depth_curves", action="store_true",
+                        help="Also plot the original shallow/mid/deep depth weight curves")
     parser.add_argument("--no_avg", action="store_true",
-                        help="Plot individual representative blocks (1, mid, last) instead of group averages")
+                        help="With --depth_curves, plot individual representative blocks instead of group averages")
     args = parser.parse_args()
 
     kv_weights, aq_weights = load_weights(args.checkpoint)
@@ -339,8 +420,8 @@ def main():
     kv_metrics = compute_all_metrics(kv_weights, "KV (Task Features)")
     aq_metrics = compute_all_metrics(aq_weights, "AQ (Action Queries)")
 
-    fig_kv = make_plots(kv_weights, kv_metrics, "KV", no_avg=args.no_avg)
-    fig_aq = make_plots(aq_weights, aq_metrics, "AQ", no_avg=args.no_avg)
+    fig_kv = make_plots(kv_weights, kv_metrics, "KV", depth_curves=args.depth_curves, no_avg=args.no_avg)
+    fig_aq = make_plots(aq_weights, aq_metrics, "AQ", depth_curves=args.depth_curves, no_avg=args.no_avg)
 
     if args.save_dir:
         save_dir = Path(args.save_dir)
