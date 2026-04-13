@@ -7,6 +7,7 @@ and produces diagnostic plots (heatmap, pairwise cosine, entropy per block).
 Usage:
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --save_dir figures/
+    python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --no_avg
 """
 
 import argparse
@@ -230,27 +231,89 @@ def plot_entropy_per_block(entropy_norm: np.ndarray, top1: np.ndarray,
     ax.grid(axis="y", alpha=0.3)
 
 
-def make_plots(weights: np.ndarray, metrics: dict, feature_name: str):
-    """Create 3-panel figure for one feature type (KV or AQ)."""
+def _classify_layers(num_blocks: int):
+    """Split action head blocks into shallow / mid / deep thirds."""
+    indices = np.arange(num_blocks)
+    cuts = np.array_split(indices, 3)
+    return {"Shallow": cuts[0], "Mid": cuts[1], "Deep": cuts[2]}
+
+
+def _pick_representative_layers(num_blocks: int):
+    """Pick one shallow, one mid, one deep block index."""
+    mid = num_blocks // 2
+    return {
+        f"Shallow (block 1)": 1,
+        f"Mid (block {mid})": mid,
+        f"Deep (block {num_blocks - 1})": num_blocks - 1,
+    }
+
+
+def plot_depth_curves(weights: np.ndarray, title: str, ax: plt.Axes, no_avg: bool = False):
+    """Plot 4: Original shallow/mid/deep weight curves across VLM layers."""
+    B, L = weights.shape
+    vlm_labels = _vlm_layer_labels(L)
+    x = np.arange(L)
+
+    if B == 1:
+        ax.bar(x, weights[0], color="#4C72B0", alpha=0.85)
+        ax.set_xticks(x)
+        ax.set_xticklabels(vlm_labels, fontsize=7, rotation=45)
+        ax.set_xlabel("VLM Layer")
+        ax.set_ylabel("Softmax Weight")
+        ax.set_title(title)
+        ax.axhline(1.0 / L, color="gray", ls="--", lw=0.8, label="uniform")
+        ax.legend(fontsize=8)
+        return
+
+    colors_list = ["#4C72B0", "#DD8452", "#55A868"]
+
+    if no_avg:
+        representatives = _pick_representative_layers(B)
+        for (label, idx), color in zip(representatives.items(), colors_list):
+            ax.plot(x, weights[idx], label=label, color=color, lw=2, marker="o", markersize=3)
+    else:
+        groups = _classify_layers(B)
+        for (group_name, block_indices), color in zip(groups.items(), colors_list):
+            group_weights = weights[block_indices]
+            mean = group_weights.mean(axis=0)
+            std = group_weights.std(axis=0)
+            ax.plot(x, mean, label=f"{group_name} (blocks {block_indices[0]}-{block_indices[-1]})",
+                    color=color, lw=2)
+            ax.fill_between(x, mean - std, mean + std, alpha=0.15, color=color)
+
+    ax.axhline(1.0 / L, color="gray", ls="--", lw=0.8, label=f"uniform (1/{L})")
+    ax.set_xticks(x)
+    ax.set_xticklabels(vlm_labels, fontsize=7, rotation=45)
+    ax.set_xlabel("VLM Layer")
+    ax.set_ylabel("Softmax Weight")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.3)
+
+
+def make_plots(weights: np.ndarray, metrics: dict, feature_name: str, no_avg: bool = False):
+    """Create 4-panel figure for one feature type (KV or AQ)."""
     B, L = weights.shape
     pc = metrics["pairwise_cosine"]
     em = metrics["entropy"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 
-    plot_routing_heatmap(weights, f"{feature_name} — Routing Weights", axes[0])
+    plot_routing_heatmap(weights, f"{feature_name} — Routing Weights", axes[0, 0])
 
     if B > 1:
         plot_cosine_heatmap(pc["cos_matrix"],
                             f"{feature_name} — Pairwise Cosine (spec={pc['specialization_index']:.3f})",
-                            axes[1])
+                            axes[0, 1])
     else:
-        axes[1].text(0.5, 0.5, "Shared weights\n(single block)",
-                     ha="center", va="center", fontsize=14)
-        axes[1].set_title(f"{feature_name} — Pairwise Cosine")
+        axes[0, 1].text(0.5, 0.5, "Shared weights\n(single block)",
+                        ha="center", va="center", fontsize=14)
+        axes[0, 1].set_title(f"{feature_name} — Pairwise Cosine")
 
     plot_entropy_per_block(em["per_block_entropy_norm"], em["top1_mass"], em["top3_mass"],
-                           f"{feature_name} — Entropy & Top-k Mass", axes[2])
+                           f"{feature_name} — Entropy & Top-k Mass", axes[1, 0])
+
+    plot_depth_curves(weights, f"{feature_name} — Depth Weight Curves", axes[1, 1], no_avg=no_avg)
 
     fig.suptitle(f"Depth-Wise Routing Analysis — {feature_name}", fontsize=14, fontweight="bold")
     fig.tight_layout()
@@ -267,6 +330,8 @@ def main():
                         help="Path to action_head--*_checkpoint.pt")
     parser.add_argument("--save_dir", type=str, default=None,
                         help="Directory to save figures (default: show interactively)")
+    parser.add_argument("--no_avg", action="store_true",
+                        help="Plot individual representative blocks (1, mid, last) instead of group averages")
     args = parser.parse_args()
 
     kv_weights, aq_weights = load_weights(args.checkpoint)
@@ -274,8 +339,8 @@ def main():
     kv_metrics = compute_all_metrics(kv_weights, "KV (Task Features)")
     aq_metrics = compute_all_metrics(aq_weights, "AQ (Action Queries)")
 
-    fig_kv = make_plots(kv_weights, kv_metrics, "KV")
-    fig_aq = make_plots(aq_weights, aq_metrics, "AQ")
+    fig_kv = make_plots(kv_weights, kv_metrics, "KV", no_avg=args.no_avg)
+    fig_aq = make_plots(aq_weights, aq_metrics, "AQ", no_avg=args.no_avg)
 
     if args.save_dir:
         save_dir = Path(args.save_dir)
