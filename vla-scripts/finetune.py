@@ -5,11 +5,13 @@ Fine-tunes Qwen2.5-0.5B via LoRA.
 """
 
 import os
+import random
 import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Type
+import numpy as np
 import torch.nn.functional as F
 import draccus
 import torch
@@ -132,6 +134,7 @@ class FinetuneConfig:
     use_depth_wise_weighting: bool = False                   # If True, uses learnable layer-wise mixing
     share_depth_weights: bool = False                        # If True, all action-head layers share mixing weights
     normalize_aq_before_combination: bool = True             # If True, LayerNorm ActionQueries before combining
+    seed: int = 42                                             # Random seed for reproducibility
     # fmt: on
 
 
@@ -738,6 +741,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     """ 
 
     global RAW_STATE_DICT
+
+    # Set random seeds for reproducibility
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    torch.cuda.manual_seed_all(cfg.seed)
 
     assert not (cfg.use_l1_regression and cfg.use_diffusion), (
         "Cannot do both L1 regression and diffusion. Please pick one of them!"
