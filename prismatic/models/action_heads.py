@@ -31,11 +31,14 @@ class L1RegressionActionHead(nn.Module):
         num_vlm_layers=25,
         share_depth_weights=False,
         normalize_aq_before_combination=True,
+        use_action_queries=True,
+        use_kv_gate=True,
     ):
         super().__init__()
         self.num_task_tokens = num_task_tokens
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
+        self.use_action_queries = use_action_queries
         self.model = MLPResNet(
             num_blocks=24,
             input_dim=input_dim*ACTION_DIM,
@@ -46,6 +49,8 @@ class L1RegressionActionHead(nn.Module):
             num_vlm_layers=num_vlm_layers,
             share_depth_weights=share_depth_weights,
             normalize_aq_before_combination=normalize_aq_before_combination,
+            use_action_queries=use_action_queries,
+            use_kv_gate=use_kv_gate,
             )
 
     def predict_action(
@@ -63,7 +68,11 @@ class L1RegressionActionHead(nn.Module):
         proprio_features = proprio_features.unsqueeze(dim=1)  # (bsz, 1, llm_dim)
 
         task_hidden_states = actions_hidden_states[:, :, :self.num_task_tokens, :]
-        actions_hidden_states = actions_hidden_states[:, :, self.num_task_tokens:, :]
+        if self.use_action_queries:
+            actions_hidden_states = actions_hidden_states[:, :, self.num_task_tokens:, :]
+        else:
+            # Pure-KV-cache mode: discard the action-position hidden states; h_a is unused.
+            actions_hidden_states = None
 
         cond_actions_hidden_states = torch.zeros(
             (batch_size, self.action_dim * NUM_ACTIONS_CHUNK, self.hidden_dim),
@@ -102,10 +111,13 @@ class MLPResNet(nn.Module):
             num_vlm_layers=25,
             share_depth_weights=False,
             normalize_aq_before_combination=True,
+            use_action_queries=True,
+            use_kv_gate=True,
             ):
 
         super().__init__()
         self.use_depth_wise_weighting = use_depth_wise_weighting
+        self.use_action_queries = use_action_queries
         self.layer_norm1 = nn.LayerNorm(input_dim)
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.relu = nn.ReLU()
@@ -113,9 +125,17 @@ class MLPResNet(nn.Module):
 
         for _ in range(num_blocks):
             if use_pro_version:
-                self.mlp_resnet_blocks.append(MLPResNetBlock_Pro(dim=hidden_dim))
+                self.mlp_resnet_blocks.append(MLPResNetBlock_Pro(
+                    dim=hidden_dim,
+                    use_action_queries=use_action_queries,
+                    use_kv_gate=use_kv_gate,
+                ))
             else:
-                self.mlp_resnet_blocks.append(MLPResNetBlock(dim=hidden_dim))
+                self.mlp_resnet_blocks.append(MLPResNetBlock(
+                    dim=hidden_dim,
+                    use_action_queries=use_action_queries,
+                    use_kv_gate=use_kv_gate,
+                ))
 
         self.layer_norm2 = nn.LayerNorm(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
@@ -149,7 +169,7 @@ class MLPResNet(nn.Module):
                 h_t_i, h_a_i = self.feature_weighting.combine(h_t_normed, h_a_sources, layer_idx=i)
             else:
                 h_t_i = h_t[:, i+1, :]
-                h_a_i = h_a[:, i+1, :]
+                h_a_i = h_a[:, i+1, :] if h_a is not None else None
             x = block(x, h_t=h_t_i, h_a=h_a_i, p=p)  # shape: (batch_size, hidden_dim)
         x = self.layer_norm2(x)  # shape: (batch_size, hidden_dim)
         x = self.fc2(x)  # shape: (batch_size, output_dim)
@@ -272,7 +292,9 @@ class DepthWiseFeatureWeighting(nn.Module):
         h_t_normed = (h_t_all - mean_t) * rstd_t * kv_w[None, :, None, :] + kv_b[None, :, None, :]
 
         # --- Vectorized AQ normalization ---
-        if self.normalize_action_queries:
+        if h_a_all is None:
+            h_a_sources = None
+        elif self.normalize_action_queries:
             aq_w = torch.stack([ln.weight for ln in self.aq_layer_norms])  # (L, D)
             aq_b = torch.stack([ln.bias for ln in self.aq_layer_norms])    # (L, D)
             mean_a = h_a_all.mean(dim=-1, keepdim=True)
@@ -301,8 +323,11 @@ class DepthWiseFeatureWeighting(nn.Module):
         kv_weights = torch.softmax(self.kv_weight_logits[weight_idx], dim=0)
         h_t_combined = torch.einsum("l, blpd -> bpd", kv_weights, h_t_normed)
 
-        aq_weights = torch.softmax(self.aq_weight_logits[weight_idx], dim=0)
-        h_a_combined = torch.einsum("l, bltd -> btd", aq_weights, h_a_sources)
+        if h_a_sources is None:
+            h_a_combined = None
+        else:
+            aq_weights = torch.softmax(self.aq_weight_logits[weight_idx], dim=0)
+            h_a_combined = torch.einsum("l, bltd -> btd", aq_weights, h_a_sources)
 
         return h_t_combined, h_a_combined
 
@@ -341,10 +366,12 @@ class MLPResNetBlock(nn.Module):
     Returns:
         torch.Tensor: Output tensor of shape (batch_size, seq_len, hidden_dim).
     """
-    def __init__(self, dim):
+    def __init__(self, dim, use_action_queries=True, use_kv_gate=True):
         super().__init__()
         self.dim = dim
-        
+        self.use_action_queries = use_action_queries
+        self.use_kv_gate = use_kv_gate
+
         # Main feedforward network
         self.ffn = nn.Sequential(
             nn.LayerNorm(dim),
@@ -360,6 +387,8 @@ class MLPResNetBlock(nn.Module):
         self.v_proj = nn.Linear(dim, dim)
         self.o_proj = nn.Linear(dim, dim)
 
+        # Gate is only meaningful when KV gating is enabled; keep the parameter
+        # registered unconditionally so existing checkpoints still load cleanly.
         self.gating_factor = nn.Parameter(torch.zeros(1))
 
 
@@ -367,67 +396,67 @@ class MLPResNetBlock(nn.Module):
     def forward(self, x, h_t=None, h_a=None, p=None):
         """
         x: (batch_size, seq_len, hidden_dim)
-        h, t, p: (batch_size, 1, hidden_dim) or None
+        h_t, h_a, p: (batch_size, K, hidden_dim) or None
         """
 
-        g = self.gating_factor
-        ratio_g = nn.Tanh()(g)
+        if self.use_kv_gate:
+            ratio_g = torch.tanh(self.gating_factor)
+        else:
+            ratio_g = 1.0
 
+        # Adapter stream: action queries (if enabled) + proprio conditioning.
         conditions = []
-        if h_a is not None:
+        if self.use_action_queries and h_a is not None:
             conditions.append(h_a)
         if p is not None:
             conditions.append(p)
-
-        h = torch.cat(conditions, dim=1)  # (batch_size, cond_len, hidden_dim)
+        has_adapter = len(conditions) > 0
 
         B = x.size(0)
         T = x.size(1)
         C = x.size(2)
-        K_t = h.size(1)
         K = h_t.size(1)
 
-        task_k = h
-        task_v = h
+        q_1 = self.q_proj(x)                   # (B, T, C)
+        k_tokens = self.k_proj(x)              # (B, T, C)
+        v_tokens = self.v_proj(x)              # (B, T, C)
+        k_task = self.k_proj(h_t)              # (B, K, C) — pure VLM KV
+        v_task = self.v_proj(h_t)              # (B, K, C)
 
-        adapter_k = h_t
-        adapter_v = h_t
-
-        q_1 = self.q_proj(x) # (B, T, C)
-        k_tokens = self.k_proj(x)             # (B, T, C)
-        v_tokens = self.v_proj(x)             # (B, T, C)
-        k_task = self.k_proj(task_k)    # (B, K, C)
-        v_task = self.v_proj(task_v)    # (B, K, C)
-
-        k_adapter = self.k_proj(adapter_k)    # (B, K, C)
-        v_adapter = self.v_proj(adapter_v)    # (B, K, C)
-
-        # (B, seq_len, C) -> (B, num_heads, seq_len, head_dim)
         q_1 = q_1.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        
         k_tokens = k_tokens.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         v_tokens = v_tokens.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        k_task = k_task.view(B, K_t, self.num_heads, self.head_dim).transpose(1, 2)
-        v_task = v_task.view(B, K_t, self.num_heads, self.head_dim).transpose(1, 2)
+        k_task = k_task.view(B, K, self.num_heads, self.head_dim).transpose(1, 2)
+        v_task = v_task.view(B, K, self.num_heads, self.head_dim).transpose(1, 2)
 
-        k_adapter = k_adapter.view(B, K, self.num_heads, self.head_dim).transpose(1, 2)
-        v_adapter = v_adapter.view(B, K, self.num_heads, self.head_dim).transpose(1, 2)
+        attn_scores_list = [torch.matmul(q_1, k_tokens.transpose(-2, -1))]
+        v_list = [v_tokens]
 
-        attn_scores_tokens = torch.matmul(q_1, k_tokens.transpose(-2, -1)) # (B, H, T, T)
-        attn_scores_task = torch.matmul(q_1, k_task.transpose(-2, -1)) * 1 # (B, H, T, K)
-        attn_scores_adapter = torch.matmul(q_1, k_adapter.transpose(-2, -1)) * ratio_g # (B, H, T, K)
+        if has_adapter:
+            adapter = torch.cat(conditions, dim=1)   # (B, K_a, C)
+            K_a = adapter.size(1)
+            k_adapter = self.k_proj(adapter).view(B, K_a, self.num_heads, self.head_dim).transpose(1, 2)
+            v_adapter = self.v_proj(adapter).view(B, K_a, self.num_heads, self.head_dim).transpose(1, 2)
+            # Note: original code gated *task* scores with ratio_g=1 and *adapter* scores with tanh(g);
+            # here we treat the adapter stream as un-gated and apply the KV gate to task scores —
+            # that matches the semantic intent of "KV gate on VLM KV" more cleanly.
+            attn_scores_list.append(torch.matmul(q_1, k_task.transpose(-2, -1)) * ratio_g)
+            attn_scores_list.append(torch.matmul(q_1, k_adapter.transpose(-2, -1)))
+            v_list.extend([v_task, v_adapter])
+        else:
+            attn_scores_list.append(torch.matmul(q_1, k_task.transpose(-2, -1)) * ratio_g)
+            v_list.append(v_task)
 
-        attn_scores = torch.cat([attn_scores_tokens, attn_scores_task, attn_scores_adapter], dim=-1) # (B, H, T, T+K)
-        attn_scores = attn_scores / math.sqrt(self.head_dim)
-        attn_weights = torch.softmax(attn_scores, dim=-1) # (B, H, T, T+K)
+        attn_scores = torch.cat(attn_scores_list, dim=-1) / math.sqrt(self.head_dim)
+        attn_weights = torch.softmax(attn_scores, dim=-1)
 
-        v_combined = torch.cat([v_tokens, v_task, v_adapter], dim=2) # (B, H, T+K, head_dim)
-        output = torch.matmul(attn_weights, v_combined) # (B, H, T, head_dim)
+        v_combined = torch.cat(v_list, dim=2)
+        output = torch.matmul(attn_weights, v_combined)
 
         output = output.transpose(1, 2).contiguous().view(B, T, C)
         output = self.o_proj(output)
 
-        x = self.ffn(output + x) 
+        x = self.ffn(output + x)
 
         return x
 
@@ -436,11 +465,13 @@ class MLPResNetBlock(nn.Module):
 class MLPResNetBlock_Pro(nn.Module):
     """One MLP ResNet block with separate projections for self, adapter, task + RoPE, now with FiLM modulation."""
 
-    def __init__(self, dim, num_heads=8):
+    def __init__(self, dim, num_heads=8, use_action_queries=True, use_kv_gate=True):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
+        self.use_action_queries = use_action_queries
+        self.use_kv_gate = use_kv_gate
 
         self.ffn = nn.Sequential(
             nn.LayerNorm(dim),
@@ -455,17 +486,18 @@ class MLPResNetBlock_Pro(nn.Module):
         self.k_self = nn.Linear(dim, dim)
         self.v_self = nn.Linear(dim, dim)
 
-        # Adapter cross-attention: K, V
+        # Adapter cross-attention: K, V (action queries + proprio)
         self.k_adapter = nn.Linear(dim, dim)
         self.v_adapter = nn.Linear(dim, dim)
 
-        # Task cross-attention: K, V
+        # Task cross-attention: K, V (VLM KV cache)
         self.k_task = nn.Linear(dim, dim)
         self.v_task = nn.Linear(dim, dim)
 
         self.o_proj = nn.Linear(dim, dim)
 
-        # gating
+        # Gate on VLM-KV (task) cross-attention. Keep the parameter registered
+        # unconditionally so legacy checkpoints still load.
         self.gating_factor = nn.Parameter(torch.zeros(1))
 
         # RoPE
@@ -485,19 +517,22 @@ class MLPResNetBlock_Pro(nn.Module):
 
     def forward(self, x, h_a=None, h_t=None, p=None):
         """
-        h_a: adapter tokens
-        h_t: task tokens
-        p:   possible conditioning vector (for FiLM)
+        h_a: adapter tokens (action queries)
+        h_t: task tokens (VLM KV cache)
+        p:   proprio conditioning vector
         """
-        g = self.gating_factor
-        ratio_g = torch.tanh(g)
+        ratio_g = torch.tanh(self.gating_factor) if self.use_kv_gate else 1.0
 
-        # concat h_a and p
-        h_adapter = torch.cat((h_a, p),dim=1)
+        # Build adapter stream from (optional) action queries + proprio.
+        adapter_parts = []
+        if self.use_action_queries and h_a is not None:
+            adapter_parts.append(h_a)
+        if p is not None:
+            adapter_parts.append(p)
+        has_adapter = len(adapter_parts) > 0
 
         h_task = h_t
         B, T, C = x.shape
-        K_a = h_adapter.size(1) if h_a is not None else 0
         K_t = h_task.size(1) if h_task is not None else 0
 
         # Q
@@ -507,42 +542,43 @@ class MLPResNetBlock_Pro(nn.Module):
         k_tokens = self.k_self(x)
         v_tokens = self.v_self(x)
 
-        # adapter tokens
-        k_adapter = self.k_adapter(h_adapter)
-        v_adapter = self.v_adapter(h_adapter)
-
-        # task tokens
+        # task tokens (VLM KV)
         k_task = self.k_task(h_task)
         v_task = self.v_task(h_task)
-
 
         # reshape -> multi-head
         def reshape_heads(t, B, L):
             return t.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
 
-
         q_1 = reshape_heads(q_1, B, T)
         k_tokens, v_tokens = reshape_heads(k_tokens, B, T), reshape_heads(v_tokens, B, T)
-        k_adapter, v_adapter = reshape_heads(k_adapter, B, K_a), reshape_heads(v_adapter, B, K_a)
         k_task, v_task = reshape_heads(k_task, B, K_t), reshape_heads(v_task, B, K_t)
 
-        # RoPE
+        # RoPE on self + task
         cos_main, sin_main = self.rope(seq_len=T, device=x.device, dtype=x.dtype)
         q_1, k_tokens = apply_rope(q_1, k_tokens, cos_main, sin_main)
-        cos_a, sin_a = self.rope(seq_len=K_a, device=x.device, dtype=x.dtype)
-        _, k_adapter = apply_rope(k_adapter, k_adapter, cos_a, sin_a)     
         cos_t, sin_t = self.rope(seq_len=K_t, device=x.device, dtype=x.dtype)
         _, k_task = apply_rope(k_task, k_task, cos_t, sin_t)
 
-        # attention scores
-        attn_scores = [torch.matmul(q_1, k_tokens.transpose(-2, -1))]
-        attn_scores.append(torch.matmul(q_1, k_adapter.transpose(-2, -1)))
-        attn_scores.append(torch.matmul(q_1, k_task.transpose(-2, -1)) * ratio_g)
-        attn_scores = torch.cat(attn_scores, dim=-1) / math.sqrt(self.head_dim)
+        attn_scores_list = [torch.matmul(q_1, k_tokens.transpose(-2, -1))]
+        v_list = [v_tokens]
+
+        if has_adapter:
+            h_adapter = torch.cat(adapter_parts, dim=1)
+            K_a = h_adapter.size(1)
+            k_adapter = reshape_heads(self.k_adapter(h_adapter), B, K_a)
+            v_adapter = reshape_heads(self.v_adapter(h_adapter), B, K_a)
+            cos_a, sin_a = self.rope(seq_len=K_a, device=x.device, dtype=x.dtype)
+            _, k_adapter = apply_rope(k_adapter, k_adapter, cos_a, sin_a)
+            attn_scores_list.append(torch.matmul(q_1, k_adapter.transpose(-2, -1)))
+            v_list.append(v_adapter)
+
+        attn_scores_list.append(torch.matmul(q_1, k_task.transpose(-2, -1)) * ratio_g)
+        v_list.append(v_task)
+
+        attn_scores = torch.cat(attn_scores_list, dim=-1) / math.sqrt(self.head_dim)
         attn_weights = torch.softmax(attn_scores, dim=-1)
 
-        # combine V
-        v_list = [v_tokens,v_adapter,v_task]
         v_combined = torch.cat(v_list, dim=2)
 
         output = torch.matmul(attn_weights, v_combined)

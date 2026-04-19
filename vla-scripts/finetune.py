@@ -134,6 +134,13 @@ class FinetuneConfig:
     use_depth_wise_weighting: bool = False                   # If True, uses learnable layer-wise mixing
     share_depth_weights: bool = False                        # If True, all action-head layers share mixing weights
     normalize_aq_before_combination: bool = True             # If True, LayerNorm ActionQueries before combining
+
+    # Pure-KV-cache ablations
+    use_action_queries: bool = True                          # If False, VLM skips learnable action-query injection
+                                                             #   (action positions become zero-embeddings) and the
+                                                             #   action head drops the h_a cross-attention branch
+    use_kv_gate: bool = True                                 # If False, action-head blocks drop the tanh(g) gate on
+                                                             #   task/KV cross-attention (ratio_g is fixed to 1.0)
     seed: int = 42                                             # Random seed for reproducibility
     # fmt: on
 
@@ -879,6 +886,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Set number of images in VLA input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
 
+    # Pure-KV-cache ablation: disable learnable action-query injection into the VLM
+    vla.use_action_queries = cfg.use_action_queries
+
     # vla.set_version(cfg.version)
 
     if cfg.use_lora:
@@ -892,13 +902,13 @@ def finetune(cfg: FinetuneConfig) -> None:
         vla = get_peft_model(vla, lora_config)
         for name, param in vla.named_parameters():
             if "action_queries" in name:
-                param.requires_grad = True
+                param.requires_grad = cfg.use_action_queries
         vla.print_trainable_parameters()
 
     else:
         for name, param in vla.named_parameters():
             if "action_queries" in name:
-                param.requires_grad = True
+                param.requires_grad = cfg.use_action_queries
 
     # FiLM setup
     if cfg.use_film:
@@ -946,6 +956,8 @@ def finetune(cfg: FinetuneConfig) -> None:
             "use_depth_wise_weighting": cfg.use_depth_wise_weighting,
             "share_depth_weights": cfg.share_depth_weights,
             "normalize_aq_before_combination": cfg.normalize_aq_before_combination,
+            "use_action_queries": cfg.use_action_queries,
+            "use_kv_gate": cfg.use_kv_gate,
             },
         to_bf16=True,
         )

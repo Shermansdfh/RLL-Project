@@ -272,3 +272,61 @@ See [`experiments/private-libero-object-splits.md`](private-libero-object-splits
 - Bridge Attention blocks (`MLPResNetBlock`, `MLPResNetBlock_Pro`) are completely unchanged. Only the construction of their `h_t` and `h_a` inputs is different.
 - Weight logits are initialized to zero, so the initial softmax yields uniform 1/25 weights — a safe starting point equivalent to averaging all layers.
 - Backward compatibility is preserved: when `--use_depth_wise_weighting False`, the code follows the original `h_t[:, i+1, :]` indexing path with zero overhead.
+
+## Related Ablation: Pure-KV-Cache Mode
+
+Two additional flags turn off the two learnable components that sit between the VLM and the action head, reducing the architecture to a pure layer-wise cross-attention link against the VLM KV cache.
+
+| Flag | Type | Default | Effect when `False` |
+| --- | --- | --- | --- |
+| `--use_action_queries` | `bool` | `True` | VLM no longer injects learnable `action_queries` at action-token positions — those positions are filled with fixed zero embeddings. The action head drops its `h_a` (adapter) cross-attention branch; the `action_queries.weight` parameter is frozen (`requires_grad = False`). |
+| `--use_kv_gate` | `bool` | `True` | Bridge Attention blocks stop applying `tanh(gating_factor)` to the VLM-KV (task) cross-attention scores; the gate is fixed at `1.0`. The `gating_factor` parameter is still registered (for checkpoint compatibility) but unused. |
+
+Setting both to `False` (and `--use_proprio False`) yields a decoder whose only cross-attention input is the VLM's per-layer KV cache — "pure layer-wise link of attention with VLM KV cache."
+
+### What Gets Touched
+
+| File | Change |
+| --- | --- |
+| [`vla-scripts/finetune.py`](../vla-scripts/finetune.py) | Adds `use_action_queries` / `use_kv_gate` to `FinetuneConfig`; forwards them to `L1RegressionActionHead`; sets `vla.use_action_queries` after `from_pretrained`; gates the `action_queries` `requires_grad` flip on `use_action_queries`. |
+| [`prismatic/extern/hf/modeling_prismatic.py`](../prismatic/extern/hf/modeling_prismatic.py) | `PrismaticForConditionalGeneration.__init__` registers `self.use_action_queries = True`. In `forward()`, the action-position replacement branches: learnable `action_queries` when enabled, fixed zero embeddings when disabled. |
+| [`prismatic/models/action_heads.py`](../prismatic/models/action_heads.py) | Both flags threaded through `L1RegressionActionHead` → `MLPResNet` → `MLPResNetBlock` / `MLPResNetBlock_Pro`. Blocks accept `h_a=None`, skip the adapter cross-attention branch when `use_action_queries=False`, and use `ratio_g = 1.0` when `use_kv_gate=False`. `DepthWiseFeatureWeighting.normalize_all` / `combine` tolerate `h_a_all=None`. `L1RegressionActionHead.predict_action` stops slicing out the action-position hidden states when `use_action_queries=False`. |
+
+### Compatibility Matrix
+
+| `use_action_queries` | `use_kv_gate` | Behavior |
+| --- | --- | --- |
+| `True` | `True` | Original VLA-Adapter architecture (default). |
+| `True` | `False` | Action queries kept; gate fixed to 1. |
+| `False` | `True` | Zero-embedded action positions; adapter branch dropped; gate still on VLM-KV scores. |
+| `False` | `False` | Pure layer-wise link: self-attention + un-gated VLM-KV cross-attention (+ proprio, if enabled). |
+
+### Training Example — Pure-KV-Cache
+
+```bash
+CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
+  --vlm_path pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b \
+  --config_file_path pretrained_models/configs \
+  --data_root_dir data/libero \
+  --dataset_name libero_object_no_noops \
+  --run_root_dir outputs \
+  --use_film False \
+  --num_images_in_input 2 \
+  --use_proprio True \
+  --use_lora True \
+  --use_minivlm True \
+  --use_pro_version True \
+  --use_action_queries False \
+  --use_kv_gate False \
+  --wandb_entity "YOUR_WANDB_ENTITY" \
+  --wandb_project "LIBERO-Object-PureKV" \
+  --run_id_note LIBERO-Object-PureKV--$(date +%Y%m%d-%H%M%S)
+```
+
+Combine with `--use_depth_wise_weighting True` if you also want learnable layer mixing on the VLM KV — the two features are orthogonal.
+
+### Caveats
+
+- **Checkpoints are not cross-compatible.** A pure-KV-cache checkpoint drops the projections for `h_a` in the Pro block (`k_adapter`, `v_adapter` are still registered but untrained in the adapter-dropped code path) and leaves `action_queries.weight` at zero. Loading such a checkpoint with `--use_action_queries True` will produce a silently broken model.
+- **Inference script not yet wired.** `experiments/robot/openvla_utils.py` and `vla-scripts/vla_evaluation.py` currently load models without forwarding these flags — before running rollouts on a pure-KV checkpoint, set `vla.use_action_queries = False` manually and reconstruct the action head with matching flags.
+- **Parameter budget.** When `use_action_queries=False`, the `action_queries` embedding (`NUM_TOKENS × llm_dim`) and the `k_adapter`/`v_adapter` projections in each Pro block are dead weight — still loaded, but never receive gradients or contribute to the forward pass.

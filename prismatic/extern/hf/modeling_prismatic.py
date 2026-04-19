@@ -375,6 +375,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         self.action_queries = nn.Embedding(NUM_TOKENS, self.llm_dim)
         self.action_queries.weight.data.zero_()
 
+        # If False, action token positions are replaced with fixed zero embeddings
+        # instead of learnable action queries (pure-KV-cache ablation).
+        self.use_action_queries = True
+
         # HF Boilerplate =>> initializes weights via `_init_weights()` and sets gradient checkpointing
         self.post_init()
 
@@ -615,22 +619,20 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
 
             # Process action embeddings
-            if noisy_actions is not None:
-                
-
-                action_queries = self.action_queries.weight  # (1, h)
-                action_queries = action_queries.view(1, action_queries.shape[0], action_queries.shape[1]).repeat(input_embeddings.shape[0], 1, 1)  # (b, chunk_size, h)
-                all_actions_mask = self._process_action_masks(labels)
+            all_actions_mask = self._process_action_masks(labels)
+            if getattr(self, "use_action_queries", True):
+                action_queries = self.action_queries.weight  # (num_tokens, h)
+                action_queries = action_queries.view(1, action_queries.shape[0], action_queries.shape[1]).repeat(input_embeddings.shape[0], 1, 1)  # (b, num_tokens, h)
                 input_embeddings = self._replace_input_embeddings(
                     input_embeddings, all_actions_mask, action_queries)
-                
-
             else:
-                action_queries = self.action_queries.weight  # (1, h)
-                action_queries = action_queries.view(1, action_queries.shape[0], action_queries.shape[1]).repeat(input_embeddings.shape[0], 1, 1)  # (b, chunk_size, h)
-                all_actions_mask = self._process_action_masks(labels)
+                # Pure-KV-cache ablation: zero-out action positions with fixed (non-learnable) zeros
+                zero_queries = torch.zeros(
+                    input_embeddings.shape[0], NUM_TOKENS, input_embeddings.shape[2],
+                    dtype=input_embeddings.dtype, device=input_embeddings.device,
+                )
                 input_embeddings = self._replace_input_embeddings(
-                    input_embeddings, all_actions_mask, action_queries)
+                    input_embeddings, all_actions_mask, zero_queries)
 
             # Build multimodal embeddings & attention mask
             multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
