@@ -57,8 +57,24 @@ Three flags control the feature, all in `FinetuneConfig`:
 | `--use_depth_wise_weighting` | `bool` | `False` | Enable depth-wise feature weighting |
 | `--share_depth_weights` | `bool` | `False` | If `True`, all 24 action-head blocks share one set of mixing weights. If `False`, each block learns its own. |
 | `--normalize_aq_before_combination` | `bool` | `True` | If `True`, ActionQueries are LayerNorm-ed before the weighted sum. If `False`, raw (un-normalized) ActionQueries are combined. The LayerNorm modules are still created (for easy switching) but bypassed. |
+| `--depth_weight_top_k` | `int` | `0` | If `>0` and `< num_vlm_layers`, each action-head block mixes only its `k` highest-weighted VLM layers (others masked to zero via softmax `-inf`). `0` disables the gate (mix over all layers). |
+| `--depth_weight_epsilon` | `float` | `0.0` | Epsilon-greedy exploration (training only). With probability ε, the top-k selection is replaced by a uniformly random draw of `k` VLM layers. Sampled independently per block and per stream (K/V vs AQ) on every forward pass. `0.0` disables exploration. Ignored at eval. |
 
 When `--use_depth_wise_weighting False` (the default), behavior is identical to the original codebase.
+
+### Top-K with Epsilon-Greedy Exploration
+
+Setting `--depth_weight_top_k k` turns the dense softmax-over-all-layers into a sparse gate: only the `k` selected VLM layers contribute to the mix, with softmax re-normalized over the selected subset. Gradients flow only through the selected logits; the rest have zero gradient for that step.
+
+`--depth_weight_epsilon ε` overrides the top-k choice with a random k-subset with probability ε during training. This keeps under-used VLM layers alive long enough to get gradient and potentially climb into the top-k. Use it when you observe the softmax collapsing to a narrow depth range early in training and want to encourage wider exploration.
+
+Typical recipes:
+
+- Dense mix (default): `--depth_weight_top_k 0`
+- Sparse mix, no exploration: `--depth_weight_top_k 5 --depth_weight_epsilon 0.0`
+- Sparse mix with exploration: `--depth_weight_top_k 5 --depth_weight_epsilon 0.1`
+
+**Checkpoint compatibility:** `top_k` and `epsilon` change forward behavior, not parameter shapes, so checkpoints trained with one setting load cleanly under another. However, mixing weights learned under a sparse gate may look very different from dense-gate weights, so don't expect behavior to transfer.
 
 ## Parameter Budget
 
@@ -272,6 +288,8 @@ See [`experiments/private-libero-object-splits.md`](private-libero-object-splits
 - Bridge Attention blocks (`MLPResNetBlock`, `MLPResNetBlock_Pro`) are completely unchanged. Only the construction of their `h_t` and `h_a` inputs is different.
 - Weight logits are initialized to zero, so the initial softmax yields uniform 1/25 weights — a safe starting point equivalent to averaging all layers.
 - Backward compatibility is preserved: when `--use_depth_wise_weighting False`, the code follows the original `h_t[:, i+1, :]` indexing path with zero overhead.
+- Top-k masking is implemented by adding `-inf` to unselected logits before softmax (not by slicing), so the combine step stays vectorized and gradient flow through selected logits is identical to the dense case.
+- Epsilon-greedy draws use `torch.randperm` on the current device, one draw per (block × stream) per forward. It respects `model.train()` / `model.eval()` — at eval time only the deterministic top-k path runs.
 
 ## Related Ablation: Pure-KV-Cache Mode
 

@@ -33,6 +33,8 @@ class L1RegressionActionHead(nn.Module):
         normalize_aq_before_combination=True,
         use_action_queries=True,
         use_kv_gate=True,
+        depth_weight_top_k=0,
+        depth_weight_epsilon=0.0,
     ):
         super().__init__()
         self.num_task_tokens = num_task_tokens
@@ -51,6 +53,8 @@ class L1RegressionActionHead(nn.Module):
             normalize_aq_before_combination=normalize_aq_before_combination,
             use_action_queries=use_action_queries,
             use_kv_gate=use_kv_gate,
+            depth_weight_top_k=depth_weight_top_k,
+            depth_weight_epsilon=depth_weight_epsilon,
             )
 
     def predict_action(
@@ -113,6 +117,8 @@ class MLPResNet(nn.Module):
             normalize_aq_before_combination=True,
             use_action_queries=True,
             use_kv_gate=True,
+            depth_weight_top_k=0,
+            depth_weight_epsilon=0.0,
             ):
 
         super().__init__()
@@ -148,6 +154,8 @@ class MLPResNet(nn.Module):
                 hidden_dim=hidden_dim,
                 share_weights_across_layers=share_depth_weights,
                 normalize_action_queries=normalize_aq_before_combination,
+                top_k=depth_weight_top_k,
+                epsilon=depth_weight_epsilon,
             )
         else:
             self.feature_weighting = None
@@ -237,6 +245,11 @@ class DepthWiseFeatureWeighting(nn.Module):
         normalize_action_queries: If True, ActionQueries are LayerNorm-ed before
             the linear combination; if False, the raw (un-normalized) ActionQueries
             are combined (LayerNorm modules are still created but bypassed).
+        top_k: If >0 and < num_vlm_layers, only the k selected VLM layers contribute
+            to the mix (others masked to zero via softmax -inf). 0 disables the gate.
+        epsilon: Probability (in training mode) of replacing the top-k selection
+            with a uniformly random set of k VLM layers, per action-head block and
+            per stream (KV vs AQ). 0.0 disables exploration.
     """
 
     def __init__(
@@ -246,11 +259,20 @@ class DepthWiseFeatureWeighting(nn.Module):
         hidden_dim: int,
         share_weights_across_layers: bool = False,
         normalize_action_queries: bool = True,
+        top_k: int = 0,
+        epsilon: float = 0.0,
     ):
         super().__init__()
         self.num_vlm_layers = num_vlm_layers
         self.share_weights_across_layers = share_weights_across_layers
         self.normalize_action_queries = normalize_action_queries
+        if top_k < 0 or top_k > num_vlm_layers:
+            raise ValueError(f"top_k must be in [0, {num_vlm_layers}], got {top_k}")
+        if not (0.0 <= epsilon <= 1.0):
+            raise ValueError(f"epsilon must be in [0, 1], got {epsilon}")
+        self.top_k = top_k
+        self.epsilon = epsilon
+        self.top_k_active = 0 < top_k < num_vlm_layers
 
         # Per-VLM-layer LayerNorm for raw K/V features
         self.kv_layer_norms = nn.ModuleList(
@@ -305,6 +327,25 @@ class DepthWiseFeatureWeighting(nn.Module):
 
         return h_t_normed, h_a_sources
 
+    def _topk_masked_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Return a copy of ``logits`` (shape (L,)) where all entries outside the
+        selected top-k set are -inf, so softmax zeros them out.  In training,
+        with probability ``epsilon`` the selected set is a uniformly random
+        draw of k indices instead of the top-k by logit (epsilon-greedy).
+        """
+        if not self.top_k_active:
+            return logits
+        L = logits.size(0)
+        k = self.top_k
+        if self.training and self.epsilon > 0.0 and torch.rand((), device=logits.device).item() < self.epsilon:
+            perm = torch.randperm(L, device=logits.device)[:k]
+        else:
+            perm = torch.topk(logits.detach(), k).indices
+        mask = torch.full_like(logits, float("-inf"))
+        mask[perm] = 0.0
+        return logits + mask
+
     def combine(self, h_t_normed, h_a_sources, layer_idx: int):
         """
         Cheap weighted sum for a single action-head block (no LayerNorm here).
@@ -320,13 +361,15 @@ class DepthWiseFeatureWeighting(nn.Module):
         """
         weight_idx = 0 if self.share_weights_across_layers else layer_idx
 
-        kv_weights = torch.softmax(self.kv_weight_logits[weight_idx], dim=0)
+        kv_logits = self._topk_masked_logits(self.kv_weight_logits[weight_idx])
+        kv_weights = torch.softmax(kv_logits, dim=0)
         h_t_combined = torch.einsum("l, blpd -> bpd", kv_weights, h_t_normed)
 
         if h_a_sources is None:
             h_a_combined = None
         else:
-            aq_weights = torch.softmax(self.aq_weight_logits[weight_idx], dim=0)
+            aq_logits = self._topk_masked_logits(self.aq_weight_logits[weight_idx])
+            aq_weights = torch.softmax(aq_logits, dim=0)
             h_a_combined = torch.einsum("l, bltd -> btd", aq_weights, h_a_sources)
 
         return h_t_combined, h_a_combined

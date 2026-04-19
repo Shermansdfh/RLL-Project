@@ -510,6 +510,8 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead]:
             use_depth_wise_weighting=getattr(cfg, "use_depth_wise_weighting", False),
             share_depth_weights=getattr(cfg, "share_depth_weights", False),
             normalize_aq_before_combination=getattr(cfg, "normalize_aq_before_combination", True),
+            depth_weight_top_k=getattr(cfg, "depth_weight_top_k", 0),
+            depth_weight_epsilon=getattr(cfg, "depth_weight_epsilon", 0.0),
         )
 
     else:

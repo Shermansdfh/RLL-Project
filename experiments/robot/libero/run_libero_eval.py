@@ -139,6 +139,8 @@ class GenerateConfig:
     use_depth_wise_weighting: bool = False            # If True, uses learnable layer-wise mixing
     share_depth_weights: bool = False                 # If True, all action-head layers share mixing weights
     normalize_aq_before_combination: bool = True      # If True, LayerNorm ActionQueries before combining
+    depth_weight_top_k: int = 0                       # If >0, each action-head block keeps only top-k VLM layers
+    depth_weight_epsilon: float = 0.0                 # Epsilon-greedy: prob. of replacing top-k with a random k (train-only)
 
 
 

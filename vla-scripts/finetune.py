@@ -134,6 +134,8 @@ class FinetuneConfig:
     use_depth_wise_weighting: bool = False                   # If True, uses learnable layer-wise mixing
     share_depth_weights: bool = False                        # If True, all action-head layers share mixing weights
     normalize_aq_before_combination: bool = True             # If True, LayerNorm ActionQueries before combining
+    depth_weight_top_k: int = 0                              # If >0, each action-head block keeps only top-k VLM layers
+    depth_weight_epsilon: float = 0.0                        # Epsilon-greedy: prob. of replacing top-k with a random k
 
     # Pure-KV-cache ablations
     use_action_queries: bool = True                          # If False, VLM skips learnable action-query injection
@@ -956,6 +958,8 @@ def finetune(cfg: FinetuneConfig) -> None:
             "use_depth_wise_weighting": cfg.use_depth_wise_weighting,
             "share_depth_weights": cfg.share_depth_weights,
             "normalize_aq_before_combination": cfg.normalize_aq_before_combination,
+            "depth_weight_top_k": cfg.depth_weight_top_k,
+            "depth_weight_epsilon": cfg.depth_weight_epsilon,
             "use_action_queries": cfg.use_action_queries,
             "use_kv_gate": cfg.use_kv_gate,
             },
