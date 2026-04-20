@@ -66,6 +66,7 @@ class L1RegressionActionHead(nn.Module):
             ):
         batch_size = actions_hidden_states.shape[0]
         device = actions_hidden_states.device
+        dtype = actions_hidden_states.dtype
 
         proprio = proprio.reshape(batch_size, -1).to(torch.bfloat16)  # (bsz, proprio_dim)
         proprio_features = proprio_projector(proprio)  # (bsz, llm_dim)
@@ -80,7 +81,7 @@ class L1RegressionActionHead(nn.Module):
 
         cond_actions_hidden_states = torch.zeros(
             (batch_size, self.action_dim * NUM_ACTIONS_CHUNK, self.hidden_dim),
-            device=device, dtype=actions_hidden_states.dtype
+            device=device, dtype=dtype
         ).detach()  
 
         rearranged_actions_hidden_states = cond_actions_hidden_states.reshape(
