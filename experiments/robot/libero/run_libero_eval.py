@@ -141,6 +141,8 @@ class GenerateConfig:
     normalize_aq_before_combination: bool = True      # If True, LayerNorm ActionQueries before combining
     depth_weight_top_k: int = 0                       # If >0, each action-head block keeps only top-k VLM layers
     depth_weight_epsilon: float = 0.0                 # Epsilon-greedy: prob. of replacing top-k with a random k (train-only)
+    use_action_queries: bool = True                      # If False, VLM skips learnable action-query injection
+    use_kv_gate: bool = True                             # If False, action-head blocks drop the tanh(g) gate on VLM-KV attention
 
 
 
@@ -169,6 +171,8 @@ def initialize_model(cfg: GenerateConfig):
     # Load model
     model = get_model(cfg)
     model.set_version(cfg.save_version)
+    # Pure-KV-cache ablation: disable learnable action-query injection into the VLM
+    model.use_action_queries = cfg.use_action_queries
     # Load proprio projector if needed
     proprio_projector = None
     if cfg.use_proprio:
