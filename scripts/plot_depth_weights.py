@@ -39,9 +39,13 @@ def load_weights(checkpoint_path: str):
             aq_key = k
 
     if kv_key is None:
+        all_keys = list(state_dict.keys())
+        feature_keys = [k for k in all_keys if "feature_weighting" in k]
         raise KeyError(
             f"Could not find kv_weight_logits in checkpoint.\n"
-            f"Available keys (first 20): {list(state_dict.keys())[:20]}"
+            f"This checkpoint was likely trained without --use_depth_wise_weighting.\n"
+            f"Keys containing 'feature_weighting': {feature_keys or '(none)'}\n"
+            f"All keys ({len(all_keys)}): {all_keys}"
         )
 
     kv_logits = state_dict[kv_key]
