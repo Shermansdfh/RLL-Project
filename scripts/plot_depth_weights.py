@@ -27,6 +27,7 @@ def load_weights(checkpoint_path: str):
 
     Returns softmax-normalized weights as numpy arrays, each (B, L) where
     B = number of action-head blocks, L = number of VLM layers.
+    aq_weights is None if aq_weight_logits is not present (KV-only checkpoint).
     """
     state_dict = torch.load(checkpoint_path, map_location="cpu")
 
@@ -37,21 +38,26 @@ def load_weights(checkpoint_path: str):
         if k.endswith("aq_weight_logits"):
             aq_key = k
 
-    if kv_key is None or aq_key is None:
+    if kv_key is None:
         raise KeyError(
-            f"Could not find kv_weight_logits / aq_weight_logits in checkpoint.\n"
+            f"Could not find kv_weight_logits in checkpoint.\n"
             f"Available keys (first 20): {list(state_dict.keys())[:20]}"
         )
 
     kv_logits = state_dict[kv_key]
-    aq_logits = state_dict[aq_key]
-
     kv_weights = torch.softmax(kv_logits.float(), dim=-1).numpy()  # (B, L)
-    aq_weights = torch.softmax(aq_logits.float(), dim=-1).numpy()
 
+    aq_weights = None
     print(f"Loaded from: {checkpoint_path}")
     print(f"  kv_weight_logits shape: {kv_logits.shape}")
-    print(f"  aq_weight_logits shape: {aq_logits.shape}")
+
+    if aq_key is not None:
+        aq_logits = state_dict[aq_key]
+        aq_weights = torch.softmax(aq_logits.float(), dim=-1).numpy()
+        print(f"  aq_weight_logits shape: {aq_logits.shape}")
+    else:
+        print("  aq_weight_logits: not found (KV-only checkpoint)")
+
     shared = kv_logits.shape[0] == 1
     print(f"  Weights shared across blocks: {shared}")
     if shared:
@@ -418,18 +424,23 @@ def main():
     kv_weights, aq_weights = load_weights(args.checkpoint)
 
     kv_metrics = compute_all_metrics(kv_weights, "KV (Task Features)")
-    aq_metrics = compute_all_metrics(aq_weights, "AQ (Action Queries)")
-
     fig_kv = make_plots(kv_weights, kv_metrics, "KV", depth_curves=args.depth_curves, no_avg=args.no_avg)
-    fig_aq = make_plots(aq_weights, aq_metrics, "AQ", depth_curves=args.depth_curves, no_avg=args.no_avg)
+
+    fig_aq = None
+    if aq_weights is not None:
+        aq_metrics = compute_all_metrics(aq_weights, "AQ (Action Queries)")
+        fig_aq = make_plots(aq_weights, aq_metrics, "AQ", depth_curves=args.depth_curves, no_avg=args.no_avg)
+    else:
+        print("\nSkipping AQ analysis (KV-only checkpoint).")
 
     if args.save_dir:
         save_dir = Path(args.save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         fig_kv.savefig(save_dir / "routing_analysis_kv.png", dpi=150, bbox_inches="tight")
-        fig_aq.savefig(save_dir / "routing_analysis_aq.png", dpi=150, bbox_inches="tight")
         print(f"\nSaved to {save_dir / 'routing_analysis_kv.png'}")
-        print(f"Saved to {save_dir / 'routing_analysis_aq.png'}")
+        if fig_aq is not None:
+            fig_aq.savefig(save_dir / "routing_analysis_aq.png", dpi=150, bbox_inches="tight")
+            print(f"Saved to {save_dir / 'routing_analysis_aq.png'}")
     else:
         plt.show()
 

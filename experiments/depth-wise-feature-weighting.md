@@ -264,6 +264,24 @@ CUDA_VISIBLE_DEVICES=0 python experiments/robot/libero/run_libero_eval.py \
 
 **Important:** The depth-wise flags must match between training and evaluation. If you trained with `--share_depth_weights True`, you must pass the same flag at eval time, otherwise the `state_dict` shapes will mismatch.
 
+## Analyzing Learned Weights
+
+[`scripts/plot_depth_weights.py`](../scripts/plot_depth_weights.py) loads a checkpoint and produces routing diagnostics (heatmap, pairwise cosine/JS divergence, entropy, depth curves). Works with both full and KV-only checkpoints (AQ analysis is skipped when `aq_weight_logits` is absent).
+
+```bash
+# Interactive display
+python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt
+
+# Save figures
+python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --save_dir figures/
+
+# Include shallow/mid/deep weight curves (group averages ± std)
+python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --depth_curves
+
+# Plot individual representative blocks instead of group averages
+python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --depth_curves --no_avg
+```
+
 ## Sanity-Check Test
 
 Run the offline test (no data or pretrained weights needed) to verify shape, gradient flow, device transfer, and a 2-batch smoke train:
