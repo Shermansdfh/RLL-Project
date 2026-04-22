@@ -9,6 +9,7 @@ Usage:
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --save_dir figures/
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --depth_curves
     python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --depth_curves --no_avg
+    python scripts/plot_depth_weights.py --checkpoint path/to/action_head--XXXX_checkpoint.pt --top_k 5
 """
 
 import argparse
@@ -22,12 +23,26 @@ from pathlib import Path
 # Loading
 # ──────────────────────────────────────────────────────────────────────
 
-def load_weights(checkpoint_path: str):
+def _apply_topk_mask(logits: torch.Tensor, top_k: int) -> torch.Tensor:
+    """Mask logits outside the top-k to -inf (per row), mirroring the model's inference gate."""
+    B, L = logits.shape
+    if top_k <= 0 or top_k >= L:
+        return logits
+    masked = torch.full_like(logits, float("-inf"))
+    _, topk_idx = logits.topk(top_k, dim=-1)
+    masked.scatter_(-1, topk_idx, logits.gather(-1, topk_idx))
+    return masked
+
+
+def load_weights(checkpoint_path: str, top_k: int = 0):
     """Load kv_weight_logits and aq_weight_logits from an action head checkpoint.
 
     Returns softmax-normalized weights as numpy arrays, each (B, L) where
     B = number of action-head blocks, L = number of VLM layers.
     aq_weights is None if aq_weight_logits is not present (KV-only checkpoint).
+
+    If top_k > 0, applies the same top-k masking the model uses at inference
+    before softmax, so only the selected layers have non-zero weight.
     """
     state_dict = torch.load(checkpoint_path, map_location="cpu")
 
@@ -48,16 +63,18 @@ def load_weights(checkpoint_path: str):
             f"All keys ({len(all_keys)}): {all_keys}"
         )
 
-    kv_logits = state_dict[kv_key]
-    kv_weights = torch.softmax(kv_logits.float(), dim=-1).numpy()  # (B, L)
+    kv_logits = _apply_topk_mask(state_dict[kv_key].float(), top_k)
+    kv_weights = torch.softmax(kv_logits, dim=-1).numpy()  # (B, L)
 
     aq_weights = None
     print(f"Loaded from: {checkpoint_path}")
     print(f"  kv_weight_logits shape: {kv_logits.shape}")
+    if top_k > 0:
+        print(f"  top_k mask applied: k={top_k}")
 
     if aq_key is not None:
-        aq_logits = state_dict[aq_key]
-        aq_weights = torch.softmax(aq_logits.float(), dim=-1).numpy()
+        aq_logits = _apply_topk_mask(state_dict[aq_key].float(), top_k)
+        aq_weights = torch.softmax(aq_logits, dim=-1).numpy()
         print(f"  aq_weight_logits shape: {aq_logits.shape}")
     else:
         print("  aq_weight_logits: not found (KV-only checkpoint)")
@@ -423,9 +440,11 @@ def main():
                         help="Also plot the original shallow/mid/deep depth weight curves")
     parser.add_argument("--no_avg", action="store_true",
                         help="With --depth_curves, plot individual representative blocks instead of group averages")
+    parser.add_argument("--top_k", type=int, default=0,
+                        help="Apply top-k masking before softmax (mirrors inference gate). 0 = show all layers (default)")
     args = parser.parse_args()
 
-    kv_weights, aq_weights = load_weights(args.checkpoint)
+    kv_weights, aq_weights = load_weights(args.checkpoint, top_k=args.top_k)
 
     kv_metrics = compute_all_metrics(kv_weights, "KV (Task Features)")
     fig_kv = make_plots(kv_weights, kv_metrics, "KV", depth_curves=args.depth_curves, no_avg=args.no_avg)
