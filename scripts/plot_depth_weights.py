@@ -17,6 +17,13 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+from entmax import sparsemax, entmax15
+
+ACTIVATIONS = {
+    "softmax": lambda x, dim: torch.softmax(x, dim=dim),
+    "sparsemax": lambda x, dim: sparsemax(x, dim=dim),
+    "entmax15": lambda x, dim: entmax15(x, dim=dim),
+}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -34,16 +41,17 @@ def _apply_topk_mask(logits: torch.Tensor, top_k: int) -> torch.Tensor:
     return masked
 
 
-def load_weights(checkpoint_path: str, top_k: int = 0):
+def load_weights(checkpoint_path: str, top_k: int = 0, activation: str = "softmax"):
     """Load kv_weight_logits and aq_weight_logits from an action head checkpoint.
 
-    Returns softmax-normalized weights as numpy arrays, each (B, L) where
+    Returns normalized weights as numpy arrays, each (B, L) where
     B = number of action-head blocks, L = number of VLM layers.
     aq_weights is None if aq_weight_logits is not present (KV-only checkpoint).
 
     If top_k > 0, applies the same top-k masking the model uses at inference
-    before softmax, so only the selected layers have non-zero weight.
+    before the activation, so only the selected layers have non-zero weight.
     """
+    activate = ACTIVATIONS[activation]
     state_dict = torch.load(checkpoint_path, map_location="cpu")
 
     kv_key = aq_key = None
@@ -64,7 +72,7 @@ def load_weights(checkpoint_path: str, top_k: int = 0):
         )
 
     kv_logits = _apply_topk_mask(state_dict[kv_key].float(), top_k)
-    kv_weights = torch.softmax(kv_logits, dim=-1).numpy()  # (B, L)
+    kv_weights = activate(kv_logits, dim=-1).numpy()  # (B, L)
 
     aq_weights = None
     print(f"Loaded from: {checkpoint_path}")
@@ -74,7 +82,7 @@ def load_weights(checkpoint_path: str, top_k: int = 0):
 
     if aq_key is not None:
         aq_logits = _apply_topk_mask(state_dict[aq_key].float(), top_k)
-        aq_weights = torch.softmax(aq_logits, dim=-1).numpy()
+        aq_weights = activate(aq_logits, dim=-1).numpy()
         print(f"  aq_weight_logits shape: {aq_logits.shape}")
     else:
         print("  aq_weight_logits: not found (KV-only checkpoint)")
@@ -441,10 +449,13 @@ def main():
     parser.add_argument("--no_avg", action="store_true",
                         help="With --depth_curves, plot individual representative blocks instead of group averages")
     parser.add_argument("--top_k", type=int, default=0,
-                        help="Apply top-k masking before softmax (mirrors inference gate). 0 = show all layers (default)")
+                        help="Apply top-k masking before activation (mirrors inference gate). 0 = show all layers (default)")
+    parser.add_argument("--activation", type=str, default="softmax",
+                        choices=list(ACTIVATIONS),
+                        help="Activation to normalize logits (default: softmax)")
     args = parser.parse_args()
 
-    kv_weights, aq_weights = load_weights(args.checkpoint, top_k=args.top_k)
+    kv_weights, aq_weights = load_weights(args.checkpoint, top_k=args.top_k, activation=args.activation)
 
     kv_metrics = compute_all_metrics(kv_weights, "KV (Task Features)")
     fig_kv = make_plots(kv_weights, kv_metrics, "KV", depth_curves=args.depth_curves, no_avg=args.no_avg)

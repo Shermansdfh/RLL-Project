@@ -141,6 +141,7 @@ class GenerateConfig:
     normalize_aq_before_combination: bool = True      # If True, LayerNorm ActionQueries before combining
     depth_weight_top_k: int = 0                       # If >0, each action-head block keeps only top-k VLM layers
     depth_weight_epsilon: float = 0.0                 # Epsilon-greedy: prob. of replacing top-k with a random k (train-only)
+    depth_weight_activation: str = "softmax"           # Activation for mixing logits: "softmax", "sparsemax", or "entmax15"
     use_action_queries: bool = True                      # If False, VLM skips learnable action-query injection
     use_kv_gate: bool = True                             # If False, action-head blocks drop the tanh(g) gate on VLM-KV attention
 

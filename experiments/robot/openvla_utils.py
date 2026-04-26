@@ -512,6 +512,7 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead]:
             normalize_aq_before_combination=getattr(cfg, "normalize_aq_before_combination", True),
             depth_weight_top_k=getattr(cfg, "depth_weight_top_k", 0),
             depth_weight_epsilon=getattr(cfg, "depth_weight_epsilon", 0.0),
+            depth_weight_activation=getattr(cfg, "depth_weight_activation", "softmax"),
             use_action_queries=getattr(cfg, "use_action_queries", True),
             use_kv_gate=getattr(cfg, "use_kv_gate", True),
         )

@@ -7,7 +7,14 @@ Implementations of various action heads, which serve as alternatives to VLM sequ
 import math
 import torch
 import torch.nn as nn
+from entmax import sparsemax, entmax15
 from prismatic.vla.constants import ACTION_DIM, ACTION_TOKEN_BEGIN_IDX, IGNORE_INDEX, NUM_ACTIONS_CHUNK, PROPRIO_DIM, STOP_INDEX, NUM_TOKENS
+
+DEPTH_WEIGHT_ACTIVATIONS = {
+    "softmax": lambda x, dim: torch.softmax(x, dim=dim),
+    "sparsemax": lambda x, dim: sparsemax(x, dim=dim),
+    "entmax15": lambda x, dim: entmax15(x, dim=dim),
+}
 
 
 
@@ -35,6 +42,7 @@ class L1RegressionActionHead(nn.Module):
         use_kv_gate=True,
         depth_weight_top_k=0,
         depth_weight_epsilon=0.0,
+        depth_weight_activation="softmax",
     ):
         super().__init__()
         self.num_task_tokens = num_task_tokens
@@ -55,6 +63,7 @@ class L1RegressionActionHead(nn.Module):
             use_kv_gate=use_kv_gate,
             depth_weight_top_k=depth_weight_top_k,
             depth_weight_epsilon=depth_weight_epsilon,
+            depth_weight_activation=depth_weight_activation,
             )
 
     def predict_action(
@@ -120,6 +129,7 @@ class MLPResNet(nn.Module):
             use_kv_gate=True,
             depth_weight_top_k=0,
             depth_weight_epsilon=0.0,
+            depth_weight_activation="softmax",
             ):
 
         super().__init__()
@@ -157,6 +167,7 @@ class MLPResNet(nn.Module):
                 normalize_action_queries=normalize_aq_before_combination,
                 top_k=depth_weight_top_k,
                 epsilon=depth_weight_epsilon,
+                activation=depth_weight_activation,
             )
         else:
             self.feature_weighting = None
@@ -251,6 +262,8 @@ class DepthWiseFeatureWeighting(nn.Module):
         epsilon: Probability (in training mode) of replacing the top-k selection
             with a uniformly random set of k VLM layers, per action-head block and
             per stream (KV vs AQ). 0.0 disables exploration.
+        activation: Normalization function for mixing logits. One of
+            "softmax", "sparsemax", or "entmax15".
     """
 
     def __init__(
@@ -262,6 +275,7 @@ class DepthWiseFeatureWeighting(nn.Module):
         normalize_action_queries: bool = True,
         top_k: int = 0,
         epsilon: float = 0.0,
+        activation: str = "softmax",
     ):
         super().__init__()
         self.num_vlm_layers = num_vlm_layers
@@ -274,6 +288,9 @@ class DepthWiseFeatureWeighting(nn.Module):
         self.top_k = top_k
         self.epsilon = epsilon
         self.top_k_active = 0 < top_k < num_vlm_layers
+        if activation not in DEPTH_WEIGHT_ACTIVATIONS:
+            raise ValueError(f"activation must be one of {list(DEPTH_WEIGHT_ACTIVATIONS)}, got {activation!r}")
+        self._activate = DEPTH_WEIGHT_ACTIVATIONS[activation]
 
         # Per-VLM-layer LayerNorm for raw K/V features
         self.kv_layer_norms = nn.ModuleList(
@@ -363,14 +380,14 @@ class DepthWiseFeatureWeighting(nn.Module):
         weight_idx = 0 if self.share_weights_across_layers else layer_idx
 
         kv_logits = self._topk_masked_logits(self.kv_weight_logits[weight_idx])
-        kv_weights = torch.softmax(kv_logits, dim=0)
+        kv_weights = self._activate(kv_logits, dim=0)
         h_t_combined = torch.einsum("l, blpd -> bpd", kv_weights, h_t_normed)
 
         if h_a_sources is None:
             h_a_combined = None
         else:
             aq_logits = self._topk_masked_logits(self.aq_weight_logits[weight_idx])
-            aq_weights = torch.softmax(aq_logits, dim=0)
+            aq_weights = self._activate(aq_logits, dim=0)
             h_a_combined = torch.einsum("l, bltd -> btd", aq_weights, h_a_sources)
 
         return h_t_combined, h_a_combined

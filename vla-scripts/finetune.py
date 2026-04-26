@@ -136,6 +136,7 @@ class FinetuneConfig:
     normalize_aq_before_combination: bool = True             # If True, LayerNorm ActionQueries before combining
     depth_weight_top_k: int = 0                              # If >0, each action-head block keeps only top-k VLM layers
     depth_weight_epsilon: float = 0.0                        # Epsilon-greedy: prob. of replacing top-k with a random k
+    depth_weight_activation: str = "softmax"                 # Activation for mixing logits: "softmax", "sparsemax", or "entmax15"
 
     # Pure-KV-cache ablations
     use_action_queries: bool = True                          # If False, VLM skips learnable action-query injection
@@ -960,6 +961,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             "normalize_aq_before_combination": cfg.normalize_aq_before_combination,
             "depth_weight_top_k": cfg.depth_weight_top_k,
             "depth_weight_epsilon": cfg.depth_weight_epsilon,
+            "depth_weight_activation": cfg.depth_weight_activation,
             "use_action_queries": cfg.use_action_queries,
             "use_kv_gate": cfg.use_kv_gate,
             },

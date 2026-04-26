@@ -33,7 +33,7 @@ VLM hidden states  (25 layers, from embedding through layer 24)
         |
         v
   +--------------------------+
-  | Softmax-weighted sum     |   (separate learnable weights for raw K/V and AQ)
+  | Normalized weighted sum  |   (separate learnable weights for raw K/V and AQ; softmax/sparsemax/entmax15)
   +--------------------------+
         |
         v
@@ -44,7 +44,7 @@ For each action-head block *i*:
 
 1. **LayerNorm** is applied independently to each VLM layer's raw K/V features, and independently to each VLM layer's ActionQueries. Each VLM layer has its own learned scale and bias, so features from different depths are normalized to comparable scales.
 
-2. **Learnable weights** (one set for raw K/V, one set for ActionQueries) are softmax-normalized and used to compute a weighted sum across VLM layers.
+2. **Learnable weights** (one set for raw K/V, one set for ActionQueries) are normalized via the chosen activation (softmax, sparsemax, or entmax15) and used to compute a weighted sum across VLM layers.
 
 3. The resulting combined K/V and combined ActionQueries are fed into the Bridge Attention block, which is unchanged.
 
@@ -59,6 +59,7 @@ Three flags control the feature, all in `FinetuneConfig`:
 | `--normalize_aq_before_combination` | `bool` | `True` | If `True`, ActionQueries are LayerNorm-ed before the weighted sum. If `False`, raw (un-normalized) ActionQueries are combined. The LayerNorm modules are still created (for easy switching) but bypassed. |
 | `--depth_weight_top_k` | `int` | `0` | If `>0` and `< num_vlm_layers`, each action-head block mixes only its `k` highest-weighted VLM layers (others masked to zero via softmax `-inf`). `0` disables the gate (mix over all layers). |
 | `--depth_weight_epsilon` | `float` | `0.0` | Epsilon-greedy exploration (training only). With probability ε, the top-k selection is replaced by a uniformly random draw of `k` VLM layers. Sampled independently per block and per stream (K/V vs AQ) on every forward pass. `0.0` disables exploration. Ignored at eval. |
+| `--depth_weight_activation` | `str` | `"softmax"` | Activation used to normalize mixing logits. One of `"softmax"`, `"sparsemax"`, or `"entmax15"`. Sparsemax produces truly sparse weights (exact zeros), encouraging the model to focus on fewer VLM layers. `entmax15` (α=1.5) is a middle ground between softmax and sparsemax. Requires `pip install entmax`. |
 
 When `--use_depth_wise_weighting False` (the default), behavior is identical to the original codebase.
 
@@ -304,9 +305,9 @@ See [`experiments/private-libero-object-splits.md`](private-libero-object-splits
 ## Design Notes
 
 - Bridge Attention blocks (`MLPResNetBlock`, `MLPResNetBlock_Pro`) are completely unchanged. Only the construction of their `h_t` and `h_a` inputs is different.
-- Weight logits are initialized to zero, so the initial softmax yields uniform 1/25 weights — a safe starting point equivalent to averaging all layers.
+- Weight logits are initialized to zero, so the initial activation yields uniform 1/25 weights — a safe starting point equivalent to averaging all layers.
 - Backward compatibility is preserved: when `--use_depth_wise_weighting False`, the code follows the original `h_t[:, i+1, :]` indexing path with zero overhead.
-- Top-k masking is implemented by adding `-inf` to unselected logits before softmax (not by slicing), so the combine step stays vectorized and gradient flow through selected logits is identical to the dense case.
+- Top-k masking is implemented by adding `-inf` to unselected logits before the activation (not by slicing), so the combine step stays vectorized and gradient flow through selected logits is identical to the dense case.
 - Epsilon-greedy draws use `torch.randperm` on the current device, one draw per (block × stream) per forward. It respects `model.train()` / `model.eval()` — at eval time only the deterministic top-k path runs.
 
 ## Related Ablation: Pure-KV-Cache Mode
