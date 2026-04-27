@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import draccus
+import matplotlib.pyplot as plt
 import numpy as np
 import tqdm
 from libero.libero import benchmark
@@ -83,6 +84,81 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class LayerwiseCosineSimilarityCollector:
+    """Aggregate per-query layerwise cosine-similarity summaries during eval."""
+
+    output_dir: Path
+    run_id: str
+    enabled: bool = False
+    matrix_sum: Optional[np.ndarray] = None
+    num_queries: int = 0
+    num_layers: int = 0
+    num_tokens: int = 0
+    token_slice: str = "all"
+
+    def update(self, diagnostics: Optional[dict]) -> None:
+        if not self.enabled or diagnostics is None:
+            return
+
+        matrix = np.asarray(diagnostics["cosine_similarity"], dtype=np.float64)
+        if self.matrix_sum is None:
+            self.matrix_sum = np.zeros_like(matrix)
+            self.num_layers = int(diagnostics["num_layers"])
+            self.num_tokens = int(diagnostics["num_tokens"])
+            self.token_slice = str(diagnostics["token_slice"])
+
+        self.matrix_sum += matrix
+        self.num_queries += 1
+
+    def finalize(self, log_file=None) -> None:
+        if not self.enabled or self.matrix_sum is None or self.num_queries == 0:
+            log_message("Layerwise cosine similarity collection skipped or produced no samples.", log_file)
+            return
+
+        mean_matrix = (self.matrix_sum / float(self.num_queries)).astype(np.float32)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        matrix_path = self.output_dir / "vlm_layer_cosine_similarity.npy"
+        metadata_path = self.output_dir / "vlm_layer_cosine_similarity.json"
+        figure_path = self.output_dir / "vlm_layer_cosine_similarity.png"
+
+        np.save(matrix_path, mean_matrix)
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "run_id": self.run_id,
+                    "num_queries": self.num_queries,
+                    "num_layers": self.num_layers,
+                    "num_tokens_per_layer": self.num_tokens,
+                    "token_slice": self.token_slice,
+                    "mean_diagonal": float(np.diag(mean_matrix).mean()),
+                    "mean_off_diagonal": float(
+                        (mean_matrix.sum() - np.trace(mean_matrix))
+                        / max(mean_matrix.size - len(mean_matrix), 1)
+                    ),
+                },
+                f,
+                indent=2,
+            )
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        im = ax.imshow(mean_matrix, vmin=-1.0, vmax=1.0, cmap="coolwarm")
+        ax.set_title(f"VLM layer cosine similarity ({self.token_slice} tokens)")
+        ax.set_xlabel("Layer")
+        ax.set_ylabel("Layer")
+        ax.set_xticks(range(self.num_layers))
+        ax.set_yticks(range(self.num_layers))
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Cosine similarity")
+        fig.tight_layout()
+        fig.savefig(figure_path, dpi=200)
+        plt.close(fig)
+
+        log_message(
+            f"Saved layerwise cosine similarity matrix to {matrix_path} and heatmap to {figure_path}",
+            log_file,
+        )
+
 
 @dataclass
 class GenerateConfig:
@@ -144,6 +220,8 @@ class GenerateConfig:
     depth_weight_activation: str = "softmax"           # Activation for mixing logits: "softmax", "sparsemax", or "entmax15"
     use_action_queries: bool = True                      # If False, VLM skips learnable action-query injection
     use_kv_gate: bool = True                             # If False, action-head blocks drop the tanh(g) gate on VLM-KV attention
+    eval_vlm_layer_cosine_similarity: bool = False       # If True, save cosine similarity across VLM layers during eval
+    eval_vlm_layer_cosine_token_slice: str = "all"       # Which hidden states to compare: "all", "task", or "action"
 
 
 
@@ -155,6 +233,9 @@ def validate_config(cfg: GenerateConfig) -> None:
         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
 
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
+    assert cfg.eval_vlm_layer_cosine_token_slice in {"all", "task", "action"}, (
+        "eval_vlm_layer_cosine_token_slice must be one of: all, task, action"
+    )
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
@@ -174,6 +255,8 @@ def initialize_model(cfg: GenerateConfig):
     model.set_version(cfg.save_version)
     # Pure-KV-cache ablation: disable learnable action-query injection into the VLM
     model.use_action_queries = cfg.use_action_queries
+    model.eval_layer_cosine_enabled = cfg.eval_vlm_layer_cosine_similarity
+    model.eval_layer_cosine_token_slice = cfg.eval_vlm_layer_cosine_token_slice
     # Load proprio projector if needed
     proprio_projector = None
     if cfg.use_proprio:
@@ -227,6 +310,8 @@ def setup_logging(cfg: GenerateConfig):
     # Set up local logging
     os.makedirs(cfg.local_log_dir, exist_ok=True)
     local_log_filepath = os.path.join(cfg.local_log_dir, run_id + ".txt")
+    artifact_dir = os.path.join(cfg.local_log_dir, run_id)
+    os.makedirs(artifact_dir, exist_ok=True)
     log_file = open(local_log_filepath, "w")
     logger.info(f"Logging to local log file: {local_log_filepath}")
 
@@ -238,7 +323,7 @@ def setup_logging(cfg: GenerateConfig):
             name=run_id,
         )
 
-    return log_file, local_log_filepath, run_id
+    return log_file, local_log_filepath, run_id, artifact_dir
 
 
 
@@ -347,6 +432,7 @@ def run_episode(
     initial_state=None,
     log_file=None,
     timing_dict=None,
+    layerwise_cosine_collector: Optional[LayerwiseCosineSimilarityCollector] = None,
 ):
     """Run a single episode in the environment."""
     # Reset environment
@@ -403,6 +489,8 @@ def run_episode(
                     use_minivlm=cfg.use_minivlm,
                     timing_dict=timing_dict,
                 )
+                if layerwise_cosine_collector is not None:
+                    layerwise_cosine_collector.update(getattr(model, "_last_hidden_state_diagnostics", None))
 
                 action_queue.extend(actions) 
 
@@ -445,7 +533,8 @@ def run_task(
     total_episodes=0,
     total_successes=0,
     log_file=None,
-    save_version=None
+    save_version=None,
+    layerwise_cosine_collector: Optional[LayerwiseCosineSimilarityCollector] = None,
 ):
     """Run evaluation for a single task."""
     # Get task
@@ -499,6 +588,7 @@ def run_task(
             initial_state,
             log_file,
             timing_dict=timing_dict,
+            layerwise_cosine_collector=layerwise_cosine_collector,
         )
 
         # Update counters
@@ -579,7 +669,12 @@ def eval_libero(cfg: GenerateConfig) -> float:
     resize_size = get_image_resize_size(cfg)
 
     # Setup logging
-    log_file, local_log_filepath, run_id = setup_logging(cfg)
+    log_file, local_log_filepath, run_id, artifact_dir = setup_logging(cfg)
+    layerwise_cosine_collector = LayerwiseCosineSimilarityCollector(
+        output_dir=Path(artifact_dir),
+        run_id=run_id,
+        enabled=cfg.eval_vlm_layer_cosine_similarity,
+    )
 
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -606,7 +701,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
             total_episodes,
             total_successes,
             log_file,
-            cfg.save_version
+            cfg.save_version,
+            layerwise_cosine_collector=layerwise_cosine_collector,
         )
 
     # Calculate final success rate
@@ -627,6 +723,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
             }
         )
         wandb.save(local_log_filepath)
+
+    layerwise_cosine_collector.finalize(log_file=log_file)
 
     # Close log file
     if log_file:

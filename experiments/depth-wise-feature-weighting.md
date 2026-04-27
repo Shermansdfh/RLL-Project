@@ -6,6 +6,7 @@ Supported by:
 
 - [`vla-scripts/finetune.py`](../vla-scripts/finetune.py)
 - [`experiments/robot/openvla_utils.py`](robot/openvla_utils.py) (inference)
+- [`experiments/robot/libero/run_libero_eval.py`](robot/libero/run_libero_eval.py) (rollout eval diagnostics)
 
 Implementation lives in:
 
@@ -264,6 +265,58 @@ CUDA_VISIBLE_DEVICES=0 python experiments/robot/libero/run_libero_eval.py \
 ```
 
 **Important:** The depth-wise flags must match between training and evaluation. If you trained with `--share_depth_weights True`, you must pass the same flag at eval time, otherwise the `state_dict` shapes will mismatch.
+
+### Eval-Time Hidden-State Cosine Similarity
+
+`run_libero_eval.py` can also export a diagnostic heatmap showing how similar the VLM hidden states are across layers during policy evaluation.
+
+This is useful for checking whether different VLM depths collapse to nearly the same representation after LayerNorm, or whether shallow/mid/deep layers remain meaningfully distinct under the current checkpoint.
+
+The diagnostic works as follows:
+
+1. Collect the per-layer hidden states already produced for the action head during `predict_action()`.
+2. Apply LayerNorm over the hidden dimension for each token vector.
+3. Mean-pool tokens within each layer.
+4. Compute pairwise cosine similarity between layers.
+5. Average the resulting layer-by-layer matrix over all policy queries in the eval run.
+
+Enable it with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python experiments/robot/libero/run_libero_eval.py \
+  --use_proprio True \
+  --num_images_in_input 2 \
+  --use_film False \
+  --pretrained_checkpoint $checkpoint_dir \
+  --task_suite_name libero_object \
+  --libero_object_private_split $split \
+  --use_pro_version True \
+  --use_depth_wise_weighting True \
+  --share_depth_weights False \
+  --normalize_aq_before_combination True \
+  --eval_vlm_layer_cosine_similarity True \
+  --eval_vlm_layer_cosine_token_slice all
+```
+
+Available token slices:
+
+| Flag value | Meaning |
+| --- | --- |
+| `all` | Use both task/image-patch tokens and action-query tokens from each layer |
+| `task` | Use only the task/image-patch portion |
+| `action` | Use only the action-token portion |
+
+Outputs are written under `./experiments/logs/<run_id>/`:
+
+- `vlm_layer_cosine_similarity.npy`: averaged `(num_layers, num_layers)` cosine-similarity matrix
+- `vlm_layer_cosine_similarity.json`: metadata summary (`num_queries`, `num_layers`, `token_slice`, mean diagonal/off-diagonal)
+- `vlm_layer_cosine_similarity.png`: heatmap visualization
+
+Interpretation:
+
+- Strong diagonal is expected because each layer is perfectly similar to itself.
+- High off-diagonal values indicate that different VLM layers are producing very similar normalized representations.
+- Lower off-diagonal structure suggests stronger specialization by depth.
 
 ## Analyzing Learned Weights
 

@@ -15,6 +15,7 @@ import timm
 import tokenizers
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
@@ -746,6 +747,44 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         # Compute vocab size for de-tokenization -- revert added "multiple of"
         self.vocab_size = self.config.text_config.vocab_size - self.config.pad_to_multiple_of
+        self.eval_layer_cosine_enabled = False
+        self.eval_layer_cosine_token_slice = "all"
+        self._last_hidden_state_diagnostics = None
+
+    def _compute_hidden_state_cosine_summary(
+        self,
+        multi_layer_hidden_states: torch.Tensor,
+        num_patches: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Compute an eval-only cosine summary over layer-normalized VLM hidden states."""
+        if not self.eval_layer_cosine_enabled:
+            return None
+
+        token_slice = self.eval_layer_cosine_token_slice
+        if token_slice == "task":
+            selected_hidden_states = multi_layer_hidden_states[:, :, :num_patches, :]
+        elif token_slice == "action":
+            selected_hidden_states = multi_layer_hidden_states[:, :, num_patches:, :]
+        else:
+            selected_hidden_states = multi_layer_hidden_states
+
+        if selected_hidden_states.shape[2] == 0:
+            return None
+
+        selected_hidden_states = F.layer_norm(
+            selected_hidden_states.float(),
+            (selected_hidden_states.shape[-1],),
+        )
+        pooled_hidden_states = selected_hidden_states.mean(dim=2)
+        pooled_hidden_states = F.normalize(pooled_hidden_states, p=2, dim=-1, eps=1e-12)
+        cosine_similarity = torch.matmul(pooled_hidden_states, pooled_hidden_states.transpose(1, 2))
+
+        return {
+            "cosine_similarity": cosine_similarity.mean(dim=0).detach().cpu().numpy().astype(np.float32),
+            "num_layers": int(selected_hidden_states.shape[1]),
+            "num_tokens": int(selected_hidden_states.shape[2]),
+            "token_slice": token_slice,
+        }
 
     def _prepare_input_for_action_prediction(self, input_ids, attention_mask):
         """Prepares input for action prediction by adding necessary tokens"""
@@ -888,7 +927,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
 
-        return normalized_actions, actions_hidden_states
+        return normalized_actions, actions_hidden_states, multi_layer_hidden_states
 
 
     def predict_action(
@@ -917,6 +956,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         Returns:
             Tuple of (unnormalized_actions, action_hidden_states)
         """
+        self._last_hidden_state_diagnostics = None
 
         pixel_values = kwargs["pixel_values"] # [1, 12, 224, 224]
         attention_mask = kwargs["attention_mask"] # 
@@ -955,7 +995,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         NUM_PATCHES = self.vision_backbone.get_num_patches() * self.vision_backbone.get_num_images_in_input()
 
         # Run regression or discrete token-based prediction
-        normalized_actions, actions_hidden_states = self._regression_or_discrete_prediction(
+        normalized_actions, actions_hidden_states, multi_layer_hidden_states = self._regression_or_discrete_prediction(
             input_embeddings,
             all_actions_mask,
             projected_patch_embeddings,
@@ -967,6 +1007,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             proprio=proprio, # [8]
             proprio_projector=proprio_projector,
             )
+
+        self._last_hidden_state_diagnostics = self._compute_hidden_state_cosine_summary(
+            multi_layer_hidden_states=multi_layer_hidden_states,
+            num_patches=NUM_PATCHES,
+        )
            
         # Unnormalize predicted actions
         actions = self._unnormalize_actions(normalized_actions, unnorm_key)
